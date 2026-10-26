@@ -18,7 +18,17 @@ const beamupHost: string | undefined = readBeamupHost();
 
 function resolveHostUrl(req: Request): URL {
   const envHost = envGet('HOST') ?? envGet('BEAMUP_HOST') ?? beamupHost;
-  const hostname = envHost ? envHost.replace(/^\/\//, '') : /* istanbul ignore next */ req.host;
+  // Express ≥4.22 deprecated req.host and changed it to return the hostname WITHOUT
+  // the port (old req.host / req.hostname semantics). Every generated /extract/,
+  // /relay and MediaFlow URL is built from this origin — a portless host made them
+  // all point at port 80 and unplayable. The raw Host header still carries the port
+  // exactly as the client addressed us, so prefer it.
+  const hostHeader = typeof req.headers.host === 'string' && req.headers.host.length > 0
+    ? req.headers.host
+    : undefined;
+  const hostname = envHost
+    ? envHost.replace(/^\/\//, '')
+    : (hostHeader ?? /* istanbul ignore next */ req.hostname);
   const forwardedProto = req.headers['x-forwarded-proto'];
   const protocol = typeof forwardedProto === 'string'
     ? (forwardedProto.split(',')[0]?.trim() || req.protocol)

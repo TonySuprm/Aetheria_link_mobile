@@ -179,11 +179,16 @@ export class Fetcher {
     const flareSolverrEndpoint = envGet('FLARESOLVERR_ENDPOINT');
     const cfDetectedAt = this.cfProtectedDomains.get(url.hostname);
     if (cfDetectedAt && !flareSolverrEndpoint) {
-      if (Date.now() - cfDetectedAt < this.CF_DOMAIN_CACHE_TTL) {
+      const gotScrapingBypassedAt = Fetcher.gotScrapingBypassedDomains.get(url.hostname);
+      const bypassIsFresh = gotScrapingBypassedAt !== undefined && Date.now() - gotScrapingBypassedAt < this.GOT_SCRAPING_BYPASS_TTL;
+      // A fresh got-scraping bypass means the host IS reachable — a single
+      // blocked path (e.g. Cloudflare-challenged /?s= search) must not fast-fail
+      // every other path on the host for the whole CF_DOMAIN_CACHE_TTL.
+      if (!bypassIsFresh && Date.now() - cfDetectedAt < this.CF_DOMAIN_CACHE_TTL) {
         this.logger.info(`Fast-fail CF-protected domain: ${url.hostname}`, ctx);
         throw new BlockedError(url, BlockedReason.cloudflare_challenge, {});
       }
-      this.cfProtectedDomains.delete(url.hostname); // expired — re-check
+      this.cfProtectedDomains.delete(url.hostname); // expired (or bypassable) — re-check
     }
 
     const proxyUrl = this.getProxyForUrl(ctx, url);
@@ -378,23 +383,32 @@ export class Fetcher {
               this.recordFlareSolverrResult(true);
               this.cfProtectedDomains.delete(url.hostname);
 
+              // Anchor the cookies at the SOLUTION's final URL, not the request URL: FlareSolverr
+              // follows redirects while solving (e.g. send.cm 302 → send.now), so the cf_clearance
+              // it returns belongs to the final host and tough-cookie rejects a cross-domain set
+              // ("Cookie not in this host's domain"). One bad cookie must never kill the solve.
+              const cookieAnchor = challengeResult.solution.url || url.href;
               await Promise.all(challengeResult.solution.cookies.map(async (cookie) => {
                 if (!cookie.name.startsWith('cf_') && !cookie.name.startsWith('__cf') && !cookie.name.startsWith('__ddg')) {
                   return;
                 }
-                await this.cookieJar.setCookie(
-                  new Cookie({
-                    domain: cookie.domain.replace(/^\./, ''),
-                    expires: new Date(cookie.expiry * 1000),
-                    httpOnly: cookie.httpOnly,
-                    key: cookie.name,
-                    path: cookie.path,
-                    sameSite: cookie.sameSite,
-                    secure: cookie.secure,
-                    value: cookie.value,
-                  }),
-                  url.href,
-                );
+                try {
+                  await this.cookieJar.setCookie(
+                    new Cookie({
+                      domain: cookie.domain.replace(/^\./, ''),
+                      expires: new Date(cookie.expiry * 1000),
+                      httpOnly: cookie.httpOnly,
+                      key: cookie.name,
+                      path: cookie.path,
+                      sameSite: cookie.sameSite,
+                      secure: cookie.secure,
+                      value: cookie.value,
+                    }),
+                    cookieAnchor,
+                  );
+                } catch (cookieError) {
+                  this.logger.info(`FlareSolverr: skipping cookie ${cookie.name} for ${cookie.domain}: ${cookieError instanceof Error ? cookieError.message : cookieError}`, ctx);
+                }
               }));
 
               this.hostUserAgentMap.set(url.host, challengeResult.solution.userAgent);
@@ -607,13 +621,11 @@ export class Fetcher {
       return null;
     }
 
-    const bypassedAt = Fetcher.gotScrapingBypassedDomains.get(url.hostname);
-    if (bypassedAt && Date.now() - bypassedAt < this.GOT_SCRAPING_BYPASS_TTL) {
-      return null;
-    }
-    if (bypassedAt) {
-      Fetcher.gotScrapingBypassedDomains.delete(url.hostname);
-    }
+    // Note: no "recently bypassed" short-circuit here. CF clearance cookies won
+    // in got-scraping do not transfer to Node's TLS fingerprint, so the primary
+    // axios attempt keeps 403-ing on CF-challenged hosts and every request
+    // needs its own got-scraping pass (this is cheap — got-scraping reuses the
+    // header generator and works consistently on challenged-but-cached paths).
 
     const gotScraping = await this.loadGotScraping();
     if (!gotScraping) {
@@ -637,6 +649,10 @@ export class Fetcher {
       if (resp.statusCode >= 200 && resp.statusCode <= 399) {
         this.logger.info(`got-scraping bypassed CF for ${url.hostname}`, ctx);
         Fetcher.gotScrapingBypassedDomains.set(url.hostname, Date.now());
+        // We demonstrably know how to reach this host — lift the fast-fail mark
+        // so the next request (e.g. a post page after a blocked search) retries
+        // instead of throwing BlockedError for the whole CF_DOMAIN_CACHE_TTL.
+        this.cfProtectedDomains.delete(url.hostname);
 
         const setCookieHeaders = resp.headers['set-cookie'];
         if (setCookieHeaders) {

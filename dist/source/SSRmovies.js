@@ -68,7 +68,7 @@ class SSRmovies extends Source_1.Source {
     label = 'SSRmovies';
     contentTypes = ['movie', 'series'];
     countryCodes = [types_1.CountryCode.multi, types_1.CountryCode.hi];
-    baseUrl = 'https://ssrmovies.archi';
+    baseUrl = 'https://ssrmovies.com';
     fetcher;
     constructor(fetcher) {
         super();
@@ -141,16 +141,19 @@ class SSRmovies extends Source_1.Source {
         const $ = cheerio.load(html);
         const nameClean = this.clean(name);
         const seasonRe = season ? new RegExp(`\\bS0?${season}\\b|\\bSeason\\s+${season}\\b`, 'i') : undefined;
+        // Post pages live on a rotating content mirror (currently ssrmovies.surf)
+        // while the search frontend is ssrmovies.com — accept both host families.
+        const postHostOk = (href) => href.startsWith(`${this.baseUrl}/`) || /^https?:\/\/[a-z0-9.-]*ssrmovies\.[a-z.]+\//i.test(href);
         const candidates = [];
         $('a').each((_, el) => {
             const href = $(el).attr('href') ?? '';
             const title = $(el).text().trim();
-            if (!href.startsWith(`${this.baseUrl}/`) || title.length < 4)
+            if (!postHostOk(href) || title.length < 4)
                 return;
             if (href.includes('/page/') || href.includes('/category/') || href.includes('/wp-') || href.endsWith('/feed/'))
                 return;
             // Post slugs have at least one path segment beyond the root.
-            if (href.replace(`${this.baseUrl}/`, '').split('/').filter(Boolean).length < 1)
+            if (href.replace(/^https?:\/\/[^/]+\//, '').split('/').filter(Boolean).length < 1)
                 return;
             candidates.push({ href, title });
         });

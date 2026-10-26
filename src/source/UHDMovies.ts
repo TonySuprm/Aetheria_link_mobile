@@ -27,7 +27,7 @@ interface SidLink {
 const SIZE_RE = /\[?\s*([\d.]+)\s*(GB|MB)\s*\]?/i;
 const YEAR_RE = /\b(19[89]\d|20\d{2})\b/g;
 const YEAR_RANGE_RE = /\((\d{4})\s*-\s*(\d{4})\)/;
-const SID_HOST = 'cloud.unblockedgames.world';
+const SID_HOST = 'thenaukriadda.in';
 
 const clean = (str: string): string => str.toLowerCase().replace(/\s*&\s*/g, 'and').replace(/[^a-z0-9]/g, '');
 
@@ -95,7 +95,7 @@ export class UHDMovies extends Source {
   public readonly label = 'UHDMovies';
   public readonly contentTypes: ContentType[] = ['movie', 'series'];
   public readonly countryCodes: CountryCode[] = [CountryCode.multi, CountryCode.hi, CountryCode.en];
-  public readonly baseUrl = 'https://uhdmovies.casa';
+  public readonly baseUrl = 'https://uhdmovies.us.org';
 
   private readonly fetcher: Fetcher;
 

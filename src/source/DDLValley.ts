@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import { ContentType } from 'stremio-addon-sdk';
 import { Context, CountryCode, Meta } from '../types';
-import { Fetcher, findHeight, getTmdbEpisodeAirDate, getTmdbId, getTmdbNameAndYear, Id, isDebridHoster, normalizeFilename, TmdbId } from '../utils';
+import { Fetcher, findHeight, getTmdbEpisodeAirDate, getTmdbId, getTmdbMovieReleaseDate, getTmdbNameAndYear, Id, isDebridHoster, normalizeFilename, TmdbId } from '../utils';
 import { Source, SourceResult } from './Source';
 
 const normalize = (str: string): string =>
@@ -55,6 +55,13 @@ export class DDLValley extends Source {
       posts = await this.searchByAirDateArchive(ctx, tmdbId, name);
     }
 
+    if (posts.length === 0 && !tmdbId.season) {
+      // Movies: same story — the release-date daily archive loads without a
+      // challenge. Try it BEFORE ?s= search: one blocked search marks the whole
+      // host CF-protected in the Fetcher and fast-fails every later request.
+      posts = await this.searchByReleaseDateArchive(ctx, tmdbId, name, year);
+    }
+
     if (posts.length === 0) {
       const searchHtml = await this.search(ctx, name);
       if (searchHtml) {
@@ -100,17 +107,11 @@ export class DDLValley extends Source {
     }
   }
 
-  private async searchByAirDateArchive(
+  private async fetchArchiveDays(
     ctx: Context,
-    tmdbId: TmdbId,
-    name: string,
+    base: Date,
+    parse: (html: string) => PostInfo[],
   ): Promise<PostInfo[]> {
-    const airDate = await getTmdbEpisodeAirDate(ctx, this.fetcher, tmdbId);
-    if (!airDate) return [];
-
-    const base = new Date(airDate);
-    if (Number.isNaN(base.getTime())) return [];
-
     const offsets = [0, -1, 1, -2, 2];
     const posts: PostInfo[] = [];
 
@@ -124,18 +125,59 @@ export class DDLValley extends Source {
           this.baseUrl,
         );
 
-        try {
-          const html = await this.fetcher.text(ctx, archiveUrl, { timeout: 12000 });
-          if (!html) return;
-          const dayPosts = this.parseSearchResults(html, name, 0, tmdbId.season, tmdbId.episode);
-          if (dayPosts.length > 0) {
-            posts.push(...dayPosts);
-          }
-        } catch { /* archive day missing or blocked */ }
+        // CF challenges on this host are flaky per-request — some archive days
+        // 403 on the first hit and pass on retry, so give each day one redo.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            // The 5-day × 2-attempt scan can outlive the stream deadline;
+            // bail out instead of wasting the player's patience (HDEncode pattern).
+            if (ctx.streamDeadline && Date.now() > ctx.streamDeadline - 8000) {
+              this.fetcher.getLogger().info(`DDLValley: deadline near — skipping ${archiveUrl.pathname} attempt ${attempt}`, ctx);
+              return;
+            }
+            if (attempt > 0) await new Promise(sleep => setTimeout(sleep, 1200));
+            const html = await this.fetcher.text(ctx, archiveUrl, { timeout: 12000 });
+            if (!html) return;
+            const dayPosts = parse(html);
+            if (dayPosts.length > 0) {
+              posts.push(...dayPosts);
+            }
+            return;
+          } catch { /* archive day missing, 404, or blocked */ }
+        }
       }),
     );
 
     return posts;
+  }
+
+  private async searchByAirDateArchive(
+    ctx: Context,
+    tmdbId: TmdbId,
+    name: string,
+  ): Promise<PostInfo[]> {
+    const airDate = await getTmdbEpisodeAirDate(ctx, this.fetcher, tmdbId);
+    if (!airDate) return [];
+
+    const base = new Date(airDate);
+    if (Number.isNaN(base.getTime())) return [];
+
+    return await this.fetchArchiveDays(ctx, base, html => this.parseSearchResults(html, name, 0, tmdbId.season, tmdbId.episode));
+  }
+
+  private async searchByReleaseDateArchive(
+    ctx: Context,
+    tmdbId: TmdbId,
+    name: string,
+    year: number,
+  ): Promise<PostInfo[]> {
+    const releaseDate = await getTmdbMovieReleaseDate(ctx, this.fetcher, tmdbId);
+    if (!releaseDate) return [];
+
+    const base = new Date(releaseDate);
+    if (Number.isNaN(base.getTime())) return [];
+
+    return await this.fetchArchiveDays(ctx, base, html => this.parseSearchResults(html, name, year, undefined, undefined));
   }
 
   private parseSearchResults(
@@ -189,6 +231,27 @@ export class DDLValley extends Source {
       $('a[rel="bookmark"]').each((_i, el) => {
         const $el = $(el);
         collect($el.text().trim(), $el.attr('href') ?? '');
+      });
+    }
+
+    // The current theme (2026+) dropped rel="bookmark" — post titles are plain
+    // single-segment anchors alongside nav/author/series links, which the
+    // name/year/episode filters inside collect() already reject.
+    if (posts.length === 0) {
+      $('a[href]').each((_i, el) => {
+        const $el = $(el);
+        const href = $el.attr('href') ?? '';
+        if (!href || href.startsWith('#') || href.includes('?')) return;
+
+        try {
+          const url = new URL(href, this.baseUrl);
+          if (url.hostname.replace(/^www\./, '') !== 'ddlvalley.me') return;
+          const path = url.pathname.replace(/\/+$/, '');
+          if (!path || path.includes('/')) return; // post slugs are single-segment
+          if (/^(about|contact|dmca|forum|irc|author|category|tag|show|page|feed|wp-content|wp-includes|privacy|terms)$/i.test(path)) return;
+
+          collect($el.text().trim(), href);
+        } catch { /* invalid URL */ }
       });
     }
 

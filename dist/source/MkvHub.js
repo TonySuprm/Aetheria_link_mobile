@@ -113,7 +113,7 @@ class MkvHub extends Source_1.Source {
     label = 'MkvHub';
     contentTypes = ['movie', 'series'];
     countryCodes = [types_1.CountryCode.multi, types_1.CountryCode.hi];
-    baseUrl = 'https://www.mkvhub.pics';
+    baseUrl = 'https://mkvhub.com';
     fetcher;
     constructor(fetcher) {
         super();
@@ -156,7 +156,10 @@ class MkvHub extends Source_1.Source {
                 return { url: hosterUrl, meta };
             });
         }))).flat();
-        return results;
+        // HubCloud mirrors only: this source's other hosters (gofile — premium-gated, send.now —
+        // Turnstile-walled) never resolve for players and their extraction dragged the source past
+        // the stream-response deadline, so MkvHub often missed the first response entirely.
+        return (0, utils_1.filterHubHosts)(results);
     }
     /**
      * Search the WP site and pick the post whose slug starts with the name, followed by a
@@ -176,15 +179,18 @@ class MkvHub extends Source_1.Source {
         const $ = cheerio.load(html);
         const nameClean = this.clean(name);
         const seasonRe = season ? new RegExp(`\\bs0?${season}\\b`, 'i') : undefined;
+        // Post pages live on a rotating content mirror (currently mkvhub.loan)
+        // while the search frontend is mkvhub.com — accept the whole host family.
+        const postHostOk = (href) => href.startsWith(`${this.baseUrl}/`) || /^https?:\/\/[a-z0-9.-]*mkvhub\.[a-z.]+\//i.test(href);
         const candidates = [];
         const seen = new Set();
         $('a').each((_, el) => {
             const href = $(el).attr('href') ?? '';
-            if (!href.startsWith(`${this.baseUrl}/`))
+            if (!postHostOk(href))
                 return;
             if (href.includes('/page/') || href.includes('/category/') || href.includes('/wp-') || href.endsWith('/feed/') || href.includes('/search/'))
                 return;
-            const slug = decodeURIComponent(href.replace(`${this.baseUrl}/`, '').replace(/\/+$/, ''));
+            const slug = decodeURIComponent(href.replace(/^https?:\/\/[^/]+\//, '').replace(/\/+$/, ''));
             if (!slug || slug.includes('.') || slug.includes('/'))
                 return;
             if (seen.has(href))

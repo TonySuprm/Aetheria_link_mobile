@@ -100,6 +100,29 @@ const extractors = (0, extractor_1.createExtractors)(fetcher, logger);
 const addon = (0, express_1.default)();
 addon.set('trust proxy', true);
 addon.use(express_1.default.json());
+// ── CORS — MUST be the first middleware ─────────────────────────────
+// Express terminates the chain at the first matching ROUTE, so any
+// addon.get() registered before a middleware never sees it. These routes
+// (/sources, /config, /app-sync, /donghua-*, /stats…) are registered as
+// direct routes below, so this middleware has to come FIRST or their
+// responses ship without Access-Control-Allow-Origin and the Niphelheim
+// WebView (https://localhost) blocks them as CORS failures — "Failed to
+// fetch" on the Addons screen even though curl sees a healthy 200.
+addon.options('*', (_req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.status(204).end();
+});
+addon.use((_req, res, next) => {
+    res.setHeader('X-Request-ID', (0, node_crypto_1.randomUUID)());
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    if ((0, utils_1.envIsProd)()) {
+        res.setHeader('Cache-Control', 'public, max-age=10');
+    }
+    next();
+});
 addon.use('/public', express_1.default.static('public'));
 let pendingSyncConfig = null;
 exports.lastSyncedConfig = null;
@@ -196,6 +219,23 @@ addon.post('/app-sync', (req, res) => {
 addon.get('/config', (_req, res) => {
     res.json(exports.lastSyncedConfig && Object.keys(exports.lastSyncedConfig).length > 0 ? (0, config_1.getConfigWithEnvFallback)(exports.lastSyncedConfig) : {});
 });
+// Source registry for the Niphelheim app's Sources screen: every scraper with
+// its id, label, category (debrid/hollywood/asiandrama/anime/donghua) and the
+// CURRENT enabled state from the effective config. The app toggles via
+// POST /app-sync with disableSource_<id> keys (same contract as the webui).
+addon.get('/sources', (_req, res) => {
+    const effective = (0, config_1.getConfigWithEnvFallback)(exports.lastSyncedConfig || {});
+    res.json({
+        sources: sources.map((s) => ({
+            id: s.id,
+            label: s.label,
+            category: s.category,
+            contentTypes: s.contentTypes,
+            countryCodes: s.countryCodes,
+            disabled: (0, config_1.isSourceDisabled)(effective, s),
+        })),
+    });
+});
 const node_child_process_1 = require("node:child_process");
 addon.get('/debug-mediaflow', (_req, res) => {
     try {
@@ -226,19 +266,23 @@ addon.get('/', (_req, res) => {
 });
 if ((0, utils_1.envIsProd)()) {
     // The MediaFlow Proxy relay (/proxy/*, /extractor/*, /_token_/*) streams
-    // video: a player easily exceeds 30 segment/playlist requests per minute,
-    // so exempt it.
-    addon.use((0, express_rate_limit_1.default)({ windowMs: 60 * 1000, limit: 30, skip: (req) => req.path.startsWith('/proxy/') || req.path.startsWith('/extractor/') || req.path.startsWith('/_token_') }));
+    // video: a player easily exceeds 30 segment/playlist requests per minute.
+    // Local control endpoints are exempt too: the app's progress ticker polls
+    // every 700ms and AddonsScreen polls /sources+/config, which otherwise
+    // exhausts the 30/min window and breaks the whole settings screen.
+    // Control endpoints are usually requested under a CONFIG-PREFIXED path
+    // (/{encoded-config}/progress/..., /{encoded-config}/stream/...) by the
+    // Niphelheim app, so a plain startsWith('/progress') check misses them and
+    // the 700ms progress ticker alone exhausts the whole 30/min window — which
+    // then 429s the stream request itself. Match anywhere in the path.
+    // (Runs AFTER the CORS middleware above, so even a 429 carries ACAO.)
+    const CONTROL_SEGMENTS = ['/progress/', '/sources', '/config', '/app-sync', '/ready', '/startup', '/stats', '/donghua'];
+    const controlSkip = (req) => req.path.startsWith('/proxy/') || req.path.startsWith('/extractor/') || req.path.startsWith('/_token_')
+        || req.path === '/progress' || req.path === '/sources' || req.path === '/config'
+        || req.path === '/app-sync' || req.path === '/ready' || req.path === '/startup' || req.path === '/stats'
+        || CONTROL_SEGMENTS.some((seg) => req.path.includes(seg));
+    addon.use((0, express_rate_limit_1.default)({ windowMs: 60 * 1000, limit: 30, skip: controlSkip }));
 }
-addon.use((_req, res, next) => {
-    res.setHeader('X-Request-ID', (0, node_crypto_1.randomUUID)());
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    if ((0, utils_1.envIsProd)()) {
-        res.setHeader('Cache-Control', 'public, max-age=10');
-    }
-    next();
-});
 const extractorRegistry = new extractor_1.ExtractorRegistry(logger, extractors);
 addon.use('/', (new controller_1.ExtractController(logger, fetcher, extractorRegistry)).router);
 addon.use('/', (new controller_1.ConfigureController(sources, extractors)).router);

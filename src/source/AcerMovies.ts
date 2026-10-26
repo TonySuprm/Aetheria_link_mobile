@@ -135,16 +135,23 @@ export class AcerMovies extends Source {
     }
 
     const target = clean(name);
-    const matched = results.find((r) => {
-      const rClean = clean(r.title);
-      if (!rClean.includes(target)) return false;
-      if (year) {
-        const yearMatch = r.title.match(YEAR_RE);
-        if (yearMatch?.[1] && Math.abs(parseInt(yearMatch[1], 10) - year) > 1) return false;
-      }
-      return true;
-    });
-
+    const yearOf = (r: SearchResult): number | undefined => {
+      const m = r.title.match(YEAR_RE);
+      return m?.[1] ? parseInt(m[1], 10) : undefined;
+    };
+    const candidates = results.filter((r) => clean(r.title).includes(target));
+    if (!candidates.length) {
+      this.logger.info(`AcerMovies: no title match for "${name}" ${year ?? ''}`, ctx);
+      return [];
+    }
+    // Prefer a candidate whose year matches the requested title — the search index
+    // mixes in same-name entries without a year (e.g. "My Adventures with Superman"
+    // when searching the Superman movie), which otherwise win by list order and
+    // yield no playable qualities.
+    const matched = (year
+      ? candidates.find((r) => { const y = yearOf(r); return y !== undefined && Math.abs(y - year) <= 1; })
+      : undefined)
+      ?? candidates[0];
     if (!matched) {
       this.logger.info(`AcerMovies: no title match for "${name}" ${year ?? ''}`, ctx);
       return [];
@@ -170,6 +177,17 @@ export class AcerMovies extends Source {
     return this.handleSeries(ctx, qualityList, tmdbId.season ?? 1, tmdbId.episode ?? 1);
   }
 
+  // The API occasionally drops one of several parallel POSTs; a single spaced retry
+  // recovers it.
+  private async postWithRetry(ctx: Context, path: string, body: Record<string, unknown>): Promise<any> {
+    try {
+      return await this.postJson(ctx, path, body);
+    } catch {
+      await new Promise((res) => setTimeout(res, 1200));
+      return this.postJson(ctx, path, body);
+    }
+  }
+
   private async handleMovie(ctx: Context, qualityList: QualityItem[]): Promise<SourceResult[]> {
     const results: SourceResult[] = [];
     const seenHeights = new Set<number>();
@@ -182,7 +200,7 @@ export class AcerMovies extends Source {
     });
 
     const resolved = await Promise.allSettled(
-      filtered.map(q => this.postJson(ctx, '/api/sourceUrl', { url: q.url, seriesType: 'movie' })),
+      filtered.map(q => this.postWithRetry(ctx, '/api/sourceUrl', { url: q.url, seriesType: 'movie' })),
     );
 
     for (let i = 0; i < filtered.length; i++) {
@@ -237,7 +255,7 @@ export class AcerMovies extends Source {
     }
 
     const episodeResponses = await Promise.allSettled(
-      seasonItems.map(q => this.postJson(ctx, '/api/sourceEpisodes', { url: q.episodesUrl })),
+      seasonItems.map(q => this.postWithRetry(ctx, '/api/sourceEpisodes', { url: q.episodesUrl })),
     );
 
     const results: SourceResult[] = [];

@@ -34,10 +34,13 @@ class Kitsu extends Source_1.Source {
     async getEpisodes(ctx, animeId, season) {
         try {
             const url = new URL(`/api/edge/anime/${animeId}/episodes`, this.baseUrl);
-            url.searchParams.append('page[limit]', '100');
+            // API rejects page[limit] > 20 (400) since ~Oct 2026; follow links.next instead.
+            url.searchParams.append('page[limit]', '20');
             const episodes = [];
             let urlToFetch = url;
-            while (urlToFetch) {
+            let pages = 0;
+            while (urlToFetch && pages < 10) {
+                pages++;
                 const response = await this.fetcher.json(ctx, urlToFetch);
                 for (const episode of response.data) {
                     if (season && episode.attributes.seasonNumber !== undefined && episode.attributes.seasonNumber !== season)

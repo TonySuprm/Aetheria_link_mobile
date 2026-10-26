@@ -20,7 +20,7 @@ const typedEntries = <T extends object>(obj: T): [keyof T, T[keyof T]][] => (Obj
 export const buildManifest = (sources: Source[], extractors: Extractor[], config: Config): CustomManifest => {
   const manifest: CustomManifest = {
     id: envGetAppId(),
-    version: '0.73.2', // x-release-please-version
+    version: '0.74.0', // x-release-please-version
     name: `${envGetAppName()}${getDebridSuffix(config)}`,
     description: 'Resolves streaming sites into URLs',
     resources: [

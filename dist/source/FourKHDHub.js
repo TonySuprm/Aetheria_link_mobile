@@ -79,10 +79,10 @@ class FourKHDHub extends Source_1.Source {
     baseUrl = 'https://4khdhub.link';
     domainKey = '4kHDHub';
     FALLBACK_CANDIDATES = [
+        'https://4khdhub.one',
         'https://4khdhub.link',
         'https://4khdhub.click',
         'https://4khdhub.ink',
-        'https://4khdhub.one',
         'https://4khdhub.to',
         'https://4khdhub.cc',
     ];
@@ -119,12 +119,16 @@ class FourKHDHub extends Source_1.Source {
             })).filter((_i, { downloadItem }) => downloadItem !== undefined)
                 .map(async (_id, { countryCodes, downloadItem }) => await this.extractSourceResults(ctx, $, downloadItem, countryCodes))
                 .toArray());
-            return deduplicateSourceResults(results.flat());
+            // HubCloud mirrors only (see filterHubHosts) — the source's other mirrors are
+            // slow/dead and dragged it past the first-response deadline.
+            return (0, utils_1.filterHubHosts)(deduplicateSourceResults(results.flat()));
         }
         const results = await Promise.all($(`.download-item`)
             .map(async (_i, el) => await this.extractSourceResults(ctx, $, el, [types_1.CountryCode.multi, ...(0, utils_1.findCountryCodes)($(el).html())]))
             .toArray());
-        return deduplicateSourceResults(results.flat());
+        // HubCloud mirrors only (see filterHubHosts) — the source's other mirrors are
+        // slow/dead and dragged it past the first-response deadline.
+        return (0, utils_1.filterHubHosts)(deduplicateSourceResults(results.flat()));
     }
     ;
     fetchPageUrl = async (ctx, tmdbId) => {
@@ -165,10 +169,12 @@ class FourKHDHub extends Source_1.Source {
         };
         const urls = [];
         const seenUrls = new Set();
+        // 4KHDHub wraps its hub links in greenmotors.club/?id=<b64> redirect pages
+        // (decodable via resolveRedirectUrl) — accept those alongside direct hub links.
         $('a', el)
             .filter((_i, a) => {
             const href = $(a).attr('href');
-            return !!href && utils_1.HUB_HOST_PATTERN.test(href.toLowerCase());
+            return !!href && (utils_1.HUB_HOST_PATTERN.test(href.toLowerCase()) || /greenmotors\./.test(href.toLowerCase()));
         })
             .each((_i, a) => {
             const href = $(a).attr('href');

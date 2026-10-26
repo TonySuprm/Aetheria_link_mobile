@@ -15,7 +15,8 @@ interface DownloadLink {
 const SIZE_RE = /([\d.]+)\s*(GB|MB)/i;
 const YEAR_RE = /\b(19|20)\d{2}\b/;
 // Short-link portals that list per-quality hosters (movies) or per-episode hosters (series).
-const SHORT_LINK_RE = /linkos\.site|epios\.site/i;
+// The portal rotates TLDs (linkos.site → linkos.club, 2026) — accept the family.
+const SHORT_LINK_RE = /linkos\.(?:site|club)|epios\.(?:site|club)/i;
 // MultiCloud is the only hoster on these portals that renders server-side and exposes a direct,
 // Range-enabled .mkv (verified: HTTP 206 + Accept-Ranges: bytes) — seekable & resumable in Stremio.
 const MULTICLOUD_VIEW_RE = /multicloudlinks\.com\/view\//i;
@@ -55,7 +56,7 @@ export class WorldFree4u extends Source {
   public readonly label = 'WorldFree4u';
   public readonly contentTypes: ContentType[] = ['movie', 'series'];
   public readonly countryCodes: CountryCode[] = [CountryCode.multi, CountryCode.hi];
-  public readonly baseUrl = 'https://worldfree4u.dog';
+  public readonly baseUrl = 'https://worldfree4u.capetown';
   // dr1 "Turbo" download tokens are regenerated per MultiCloud page load and valid ~5.5h. Keep
   // cached results well inside that window so a cached /relay URL never carries an expired token.
   public override readonly ttl = 3600000; // 1h
@@ -223,6 +224,11 @@ export class WorldFree4u extends Source {
     }
 
     const $ = cheerio.load(html);
+    // 2026: the portal dropped MultiCloud entirely — GoFile is now the primary
+    // server-side hoster on linkos pages (resolved by the GoFile extractor).
+    const gofile = this.firstHref($, GOFILE_RE);
+    if (gofile) return [gofile];
+
     const multiUrl = this.firstHref($, MULTICLOUD_VIEW_RE);
     if (multiUrl) {
       const urls = await this.resolveMultiCloud(ctx, multiUrl, postUrl);

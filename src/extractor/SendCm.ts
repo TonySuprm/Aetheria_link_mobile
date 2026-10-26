@@ -3,7 +3,7 @@
 import * as cheerio from 'cheerio';
 import winston from 'winston';
 import { Context, Format, InternalUrlResult, Meta } from '../types';
-import { envGet, Fetcher, getBrowser, stealthPage } from '../utils';
+import { envGet, Fetcher, getHeadfulBrowser, stealthPage } from '../utils';
 import { Extractor } from './Extractor';
 
 const PUPPETEER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -102,12 +102,17 @@ export class SendCm extends Extractor {
   }
 
   // Drive send.now's download1 (Turnstile) → download2 → direct link in a real browser.
+  // Headful is REQUIRED: the "Download Challenge" Turnstile gate never auto-solves in headless,
+  // but auto-passes in a visible Chrome (same behavior as HDEncode's reveal and ImdbSu's player).
   private async extractViaPuppeteer(ctx: Context, url: string): Promise<string | undefined> {
-    const browser = await getBrowser(this.logger);
+    const browser = await getHeadfulBrowser(this.logger);
     const page = await browser.newPage();
     try {
       await stealthPage(page);
       await page.setUserAgent(PUPPETEER_UA);
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
       await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
 
       // Let Turnstile solve (it auto-submits via data-callback in most cases), then advance

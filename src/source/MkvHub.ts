@@ -2,7 +2,7 @@ import bytes from 'bytes';
 import * as cheerio from 'cheerio';
 import { ContentType } from 'stremio-addon-sdk';
 import { Context, CountryCode, Meta } from '../types';
-import { DEAD_HUBCLOUD_HOSTS, Fetcher, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id } from '../utils';
+import { DEAD_HUBCLOUD_HOSTS, Fetcher, filterHubHosts, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id } from '../utils';
 import { Source, SourceResult } from './Source';
 
 interface DownloadTarget {
@@ -81,7 +81,7 @@ export class MkvHub extends Source {
   public readonly label = 'MkvHub';
   public readonly contentTypes: ContentType[] = ['movie', 'series'];
   public readonly countryCodes: CountryCode[] = [CountryCode.multi, CountryCode.hi];
-  public readonly baseUrl = 'https://www.mkvhub.pics';
+  public readonly baseUrl = 'https://mkvhub.com';
 
   private readonly fetcher: Fetcher;
 
@@ -135,7 +135,10 @@ export class MkvHub extends Source {
         }),
     )).flat();
 
-    return results;
+    // HubCloud mirrors only: this source's other hosters (gofile — premium-gated, send.now —
+    // Turnstile-walled) never resolve for players and their extraction dragged the source past
+    // the stream-response deadline, so MkvHub often missed the first response entirely.
+    return filterHubHosts(results);
   }
 
   /**
@@ -157,13 +160,18 @@ export class MkvHub extends Source {
     const nameClean = this.clean(name);
     const seasonRe = season ? new RegExp(`\\bs0?${season}\\b`, 'i') : undefined;
 
+    // Post pages live on a rotating content mirror (currently mkvhub.loan)
+    // while the search frontend is mkvhub.com — accept the whole host family.
+    const postHostOk = (href: string): boolean =>
+      href.startsWith(`${this.baseUrl}/`) || /^https?:\/\/[a-z0-9.-]*mkvhub\.[a-z.]+\//i.test(href);
+
     const candidates: { href: string; slug: string }[] = [];
     const seen = new Set<string>();
     $('a').each((_, el) => {
       const href = $(el).attr('href') ?? '';
-      if (!href.startsWith(`${this.baseUrl}/`)) return;
+      if (!postHostOk(href)) return;
       if (href.includes('/page/') || href.includes('/category/') || href.includes('/wp-') || href.endsWith('/feed/') || href.includes('/search/')) return;
-      const slug = decodeURIComponent(href.replace(`${this.baseUrl}/`, '').replace(/\/+$/, ''));
+      const slug = decodeURIComponent(href.replace(/^https?:\/\/[^/]+\//, '').replace(/\/+$/, ''));
       if (!slug || slug.includes('.') || slug.includes('/')) return;
       if (seen.has(href)) return;
       seen.add(href);

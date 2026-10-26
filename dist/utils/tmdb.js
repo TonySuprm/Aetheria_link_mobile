@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getTmdbEpisodeAirDate = exports.getTmdbNameAndYear = exports.getTmdbIdFromKitsuId = exports.getKitsuAnimeMeta = exports.getImdbIdFromTmdbId = exports.getTmdbIdFromImdbId = void 0;
+exports.getTmdbMovieReleaseDate = exports.getTmdbEpisodeAirDate = exports.getTmdbNameAndYear = exports.getTmdbIdFromKitsuId = exports.getKitsuAnimeMeta = exports.getImdbIdFromTmdbId = exports.getTmdbIdFromImdbId = void 0;
 const async_mutex_1 = require("async-mutex");
 const error_1 = require("../error");
 const env_1 = require("./env");
@@ -177,3 +177,10 @@ const getTmdbEpisodeAirDate = async (ctx, fetcher, tmdbId, language) => {
     return response.air_date;
 };
 exports.getTmdbEpisodeAirDate = getTmdbEpisodeAirDate;
+const getTmdbMovieReleaseDate = async (ctx, fetcher, tmdbId, language) => {
+    if (tmdbId.season)
+        return undefined;
+    const details = await getTmdbMovieDetails(ctx, fetcher, tmdbId, language);
+    return details.release_date || undefined;
+};
+exports.getTmdbMovieReleaseDate = getTmdbMovieReleaseDate;

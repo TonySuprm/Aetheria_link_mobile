@@ -5,7 +5,7 @@ import { AnyNode } from 'domhandler';
 import Fuse from 'fuse.js';
 import { ContentType } from 'stremio-addon-sdk';
 import { Context, CountryCode, Meta } from '../types';
-import { DEAD_HUBCLOUD_HOSTS, Fetcher, findCountryCodes, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id, TmdbId } from '../utils';
+import { DEAD_HUBCLOUD_HOSTS, Fetcher, filterHubHosts, findCountryCodes, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id, TmdbId } from '../utils';
 import { resolveRedirectUrl } from './hd-hub-helper';
 import { Source, SourceResult } from './Source';
 
@@ -49,10 +49,10 @@ export class FourKHDHub extends Source {
   protected override readonly domainKey = '4kHDHub';
 
   private readonly FALLBACK_CANDIDATES = [
+    'https://4khdhub.one',
     'https://4khdhub.link',
     'https://4khdhub.click',
     'https://4khdhub.ink',
-    'https://4khdhub.one',
     'https://4khdhub.to',
     'https://4khdhub.cc',
   ];
@@ -98,7 +98,9 @@ export class FourKHDHub extends Source {
           .map(async (_id, { countryCodes, downloadItem }) => await this.extractSourceResults(ctx, $, downloadItem as BasicAcceptedElems<AnyNode>, countryCodes))
           .toArray(),
       );
-        return deduplicateSourceResults(results.flat());
+        // HubCloud mirrors only (see filterHubHosts) — the source's other mirrors are
+        // slow/dead and dragged it past the first-response deadline.
+        return filterHubHosts(deduplicateSourceResults(results.flat()));
     }
 
     const results = await Promise.all(
@@ -106,7 +108,9 @@ export class FourKHDHub extends Source {
         .map(async (_i, el) => await this.extractSourceResults(ctx, $, el, [CountryCode.multi, ...findCountryCodes($(el).html() as string)]))
         .toArray(),
     );
-    return deduplicateSourceResults(results.flat());
+    // HubCloud mirrors only (see filterHubHosts) — the source's other mirrors are
+    // slow/dead and dragged it past the first-response deadline.
+    return filterHubHosts(deduplicateSourceResults(results.flat()));
   };
 
   private readonly fetchPageUrl = async (ctx: Context, tmdbId: TmdbId): Promise<URL | undefined> => {
@@ -158,10 +162,12 @@ export class FourKHDHub extends Source {
     const urls: URL[] = [];
     const seenUrls = new Set<string>();
 
+    // 4KHDHub wraps its hub links in greenmotors.club/?id=<b64> redirect pages
+    // (decodable via resolveRedirectUrl) — accept those alongside direct hub links.
     $('a', el)
       .filter((_i, a) => {
         const href = $(a).attr('href');
-        return !!href && HUB_HOST_PATTERN.test(href.toLowerCase());
+        return !!href && (HUB_HOST_PATTERN.test(href.toLowerCase()) || /greenmotors\./.test(href.toLowerCase()));
       })
       .each((_i, a) => {
         const href = $(a).attr('href') as string;

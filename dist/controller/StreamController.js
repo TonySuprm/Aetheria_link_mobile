@@ -208,7 +208,15 @@ class StreamController {
     startResolution(ctx, sources, type, id, dedupeKey) {
         this.progress.set(dedupeKey, { completed: 0, total: sources.length, label: 'Scraping sources...' });
         const promise = this.streamResolver.resolve(ctx, sources, type, id, (completed, total, label) => {
-            this.progress.set(dedupeKey, { completed, total, label });
+            const prev = this.progress.get(dedupeKey);
+            this.progress.set(dedupeKey, { completed, total, label, ...(prev?.streams && { streams: prev.streams }) });
+        }, 
+        // Incremental per-source links: merged into the live progress entry so
+        // the app's /progress ticker can render links while sources still run.
+        (partialStreams) => {
+            const prev = this.progress.get(dedupeKey);
+            if (prev)
+                this.progress.set(dedupeKey, { ...prev, streams: partialStreams });
         })
             .then(({ streams, ttl }) => ({ streams, ttl }))
             .finally(() => {

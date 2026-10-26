@@ -119,12 +119,17 @@ class SendCm extends Extractor_1.Extractor {
         return link ? this.toResult(link, {}, url) : undefined;
     }
     // Drive send.now's download1 (Turnstile) → download2 → direct link in a real browser.
+    // Headful is REQUIRED: the "Download Challenge" Turnstile gate never auto-solves in headless,
+    // but auto-passes in a visible Chrome (same behavior as HDEncode's reveal and ImdbSu's player).
     async extractViaPuppeteer(ctx, url) {
-        const browser = await (0, utils_1.getBrowser)(this.logger);
+        const browser = await (0, utils_1.getHeadfulBrowser)(this.logger);
         const page = await browser.newPage();
         try {
             await (0, utils_1.stealthPage)(page);
             await page.setUserAgent(PUPPETEER_UA);
+            await page.evaluateOnNewDocument(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            });
             await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
             // Let Turnstile solve (it auto-submits via data-callback in most cases), then advance
             // download1 → download2. Poll for either a download2 form or a direct video link.

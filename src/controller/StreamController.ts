@@ -38,7 +38,7 @@ export class StreamController {
   // soon as the first completes (and benefits from the partial-results / cache-fill behaviour in
   // StreamResolver). Cleared once the shared promise settles.
   private readonly inFlight = new Map<string, Promise<InFlightResolution>>();
-  private readonly progress = new Map<string, { completed: number, total: number, label: string }>();
+  private readonly progress = new Map<string, { completed: number, total: number, label: string, streams?: import('stremio-addon-sdk').Stream[] }>();
   // dailymotion ids already warm-requested (30min dedupe so /stream retries
   // and Stremio re-polls don't burn extra resolves against the rate limit)
   private readonly dmWarmAt = new Map<string, number>();
@@ -221,9 +221,22 @@ export class StreamController {
   private startResolution(ctx: Context, sources: Source[], type: ContentType, id: Id, dedupeKey: string): Promise<InFlightResolution> {
     this.progress.set(dedupeKey, { completed: 0, total: sources.length, label: 'Scraping sources...' });
 
-    const promise = this.streamResolver.resolve(ctx, sources, type, id, (completed: number, total: number, label: string) => {
-      this.progress.set(dedupeKey, { completed, total, label });
-    })
+    const promise = this.streamResolver.resolve(
+      ctx,
+      sources,
+      type,
+      id,
+      (completed: number, total: number, label: string) => {
+        const prev = this.progress.get(dedupeKey);
+        this.progress.set(dedupeKey, { completed, total, label, ...(prev?.streams && { streams: prev.streams }) });
+      },
+      // Incremental per-source links: merged into the live progress entry so
+      // the app's /progress ticker can render links while sources still run.
+      (partialStreams) => {
+        const prev = this.progress.get(dedupeKey);
+        if (prev) this.progress.set(dedupeKey, { ...prev, streams: partialStreams });
+      },
+    )
       .then(({ streams, ttl }) => ({ streams, ttl }))
       .finally(() => {
         this.inFlight.delete(dedupeKey);

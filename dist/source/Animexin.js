@@ -108,7 +108,10 @@ class Animexin extends Source_1.Source {
             if (!title)
                 return;
             const typez = $el.find('.typez').first().text().trim().toLowerCase();
-            candidates.push({ href, title, isMovie: typez === 'movie', exact: clean(title) === nameClean });
+            // .typez misses some same-name movie posts; the slug says it too
+            // ("perfect-world-movie-..." vs "anime/perfect-world-wanmei-shijie").
+            const movieish = typez === 'movie' || /-movie-|-movies?\/|movie-part/.test(href);
+            candidates.push({ href, title, isMovie: movieish, exact: clean(title) === nameClean });
         });
         // Fallback: sidebar popular widget (`a.series` / `.leftseries a`) for when the theme renders no
         // `.listupd` results list.

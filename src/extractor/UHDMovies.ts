@@ -6,13 +6,21 @@ import { Fetcher } from '../utils';
 import { Extractor } from './Extractor';
 
 // UHDMovies (uhdmovies.casa) extractor. Resolves the per-quality SID links
-// (`cloud.unblockedgames.world/?sid=<base64>`, formerly `tech.unblockedgames.world`) that the
-// UHDMovies source emits, through a multi-step WP form POST → driveleech/driveseed file page →
-// "Resume Cloud"/"Instant Download" → final Google-Drive-backed direct URL (workers.dev /
-// video-downloads.googleusercontent.com). Lazy (resolution is ~8-12 requests → deferred to play
-// time). Ported from the project's uhdmovies.js reference.
+// (`cloud.unblockedgames.world/?sid=<base64>`, formerly `tech.unblockedgames.world`) to a
+// driveleech/driveseed file page, then "Resume Cloud"/"Instant Download" → final Google-Drive-backed
+// direct URL (workers.dev / video-downloads.googleusercontent.com). Lazy (resolution is ~10+ requests
+// over ~20s → deferred to play time). Ported from the project's uhdmovies.js reference.
 //
-// SID flow (cloud.unblockedgames.world):
+// SID flow A — current "lp" interstitial (en.thenaukriadda.in and friends):
+//   GET ?sid=<b64>                → #lp-land form (_lp_http)
+//   POST _lp_http                 → #lp-s1-form (_lp_http2, _lp_token, _lp_chain, _lp_hop_index)
+//                                   + a ~10s countdown (server validates the hop age — submit early
+//                                   and the chain dies with a session error)
+//   POST s1 fields (after wait)   → JS: sc("<cookieName>","<value>",<mins>) + "?lp_go=<cookieName>" href
+//   set cookie, GET ?lp_go=<name> → JS: window.location.replace("https://driveseed.org/r?key=…")
+//   → driveseed/driveleech file page → final URL
+//
+// SID flow B — legacy WP form (cloud.unblockedgames.world):
 //   GET ?sid=<b64>                  → #landing form (_wp_http + action)
 //   POST action (_wp_http)          → #landing form (_wp_http2 + token + action)
 //   POST action (_wp_http2+token)   → JS: s_343('cookieName','cookieValue') + c.setAttribute("href","<link>")
@@ -20,7 +28,7 @@ import { Extractor } from './Extractor';
 //   GET <driveleech>                → file page (Resume Cloud / Instant Download) → final URL
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const SID_HOSTS = ['cloud.unblockedgames.world', 'tech.unblockedgames.world', 'tech.examzculture.in', 'tech.creativeexpressionsblog.com'];
+const SID_HOSTS = ['cloud.unblockedgames.world', 'tech.unblockedgames.world', 'tech.examzculture.in', 'tech.creativeexpressionsblog.com', 'en.thenaukriadda.in', 'thenaukriadda.in'];
 // Final direct-URL hosts the file-page methods look for.
 const DIRECT_HOST_RE = /workers\.dev|driveleech\.net\/d\/|driveseed\.org\/d\/|googleusercontent\.com|\.r2\.dev/i;
 
@@ -92,6 +100,93 @@ export class UHDMovies extends Extractor {
 
   /** Multi-step WP form POST: SID link → driveleech URL (via meta refresh). */
   private async resolveSid(ctx: Context, sidUrl: URL): Promise<URL | null> {
+    // Current "lp" interstitial first; legacy WP form as fallback (some SID hosts still serve it).
+    const lpResult = await this.resolveSidLpFlow(ctx, sidUrl).catch(() => null);
+    if (lpResult) return lpResult;
+    return this.resolveSidLegacyFlow(ctx, sidUrl);
+  }
+
+  /**
+   * SID flow A: the "lp" interstitial (#lp-land → #lp-s1-form → sc() cookie → ?lp_go=). The s1 hop
+   * enforces a ~10s countdown server-side, so this flow takes ~15-20s — acceptable because
+   * prewarmLazy fires it at stream-list time.
+   */
+  private async resolveSidLpFlow(ctx: Context, sidUrl: URL): Promise<URL | null> {
+    const origin = sidUrl.origin;
+    const headers = { 'User-Agent': UA, 'Accept': 'text/html,*/*' };
+
+    // Step 0: GET sid page → #lp-land form (_lp_http).
+    const step0 = await this.fetcher.fetch(ctx, sidUrl, { headers, timeout: 12000 });
+    const form0 = this.grabLpForm(step0.data, 'lp-land');
+    if (!form0) return null;
+
+    // Step 1: POST _lp_http → #lp-s1-form (_lp_http2/_lp_token/_lp_chain/_lp_hop_index).
+    const step1 = await this.fetcher.fetch(ctx, new URL(form0.action, origin), {
+      method: 'POST',
+      data: new URLSearchParams(form0.fields).toString(),
+      headers: { ...headers, 'Referer': sidUrl.href, 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 15000,
+    });
+    const form1 = this.grabLpForm(step1.data, 'lp-s1');
+    if (!form1) return null;
+
+    // Respect the s1 countdown (10s observed; add margin). Bail if the stream deadline is near —
+    // the prewarm will retry later.
+    if (ctx.streamDeadline && Date.now() > ctx.streamDeadline - 16000) {
+      this.logger.info(`UHDMovies: skipping lp flow — stream deadline too close for the s1 timer`, ctx);
+      return null;
+    }
+    await new Promise(sleep => setTimeout(sleep, 12000));
+
+    // Step 2: POST s1 fields → JS sc("<name>","<value>",<mins>) + "?lp_go=<name>" link.
+    const step2 = await this.fetcher.fetch(ctx, new URL(form1.action, origin), {
+      method: 'POST',
+      data: new URLSearchParams(form1.fields).toString(),
+      headers: { ...headers, 'Referer': form1.action, 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 15000,
+    });
+    const step2Text = typeof step2.data === 'string' ? step2.data : String(step2.data);
+    const scMatch = step2Text.match(/sc\("([^"]+)",\s*"([^"]+)",\s*\d+\)/);
+    if (!scMatch) return null;
+    const cookieName = scMatch[1] as string;
+    const cookieValue = scMatch[2] as string;
+    const goHref = step2Text.match(/lp_go=([a-z0-9-]+)/i)?.[0];
+    if (!goHref) return null;
+
+    // Step 3: set the cookie, GET ?lp_go= → JS window.location.replace("<driveseed/driveleech>").
+    this.fetcher.setCookie(origin, `${cookieName}=${cookieValue}`);
+    const step3 = await this.fetcher.fetch(ctx, new URL(`?${goHref}`, origin), {
+      headers: { ...headers, Referer: form1.action }, timeout: 20000,
+    });
+    const step3Text = typeof step3.data === 'string' ? step3.data : String(step3.data);
+    const target = step3Text.match(/window\.location\.replace\(["']([^"']+)["']\)/)?.[1]
+      ?? step3Text.match(/https?:\\?\/\\?\/(?:driveseed\.org|driveleech\.net)\\?\/[^\s"']+/)?.[0];
+    if (!target) return null;
+
+    try {
+      return new URL(target.replace(/\\\//g, '/'));
+    } catch {
+      return null;
+    }
+  }
+
+  /** First form whose id starts with `prefix`, with all its input fields. */
+  private grabLpForm(html: unknown, prefix: string): { action: string; fields: Record<string, string> } | null {
+    const $ = cheerio.load(String(html));
+    const form = $(`form[id^="${prefix}"]`).first();
+    if (!form.length) return null;
+    const action = form.attr('action') ?? '';
+    const fields: Record<string, string> = {};
+    form.find('input').each((_, el) => {
+      const name = $(el).attr('name');
+      if (name) fields[name] = $(el).attr('value') ?? '';
+    });
+    if (!action || Object.keys(fields).length === 0) return null;
+    return { action, fields };
+  }
+
+  /** Legacy WP form flow (see file header, flow B). */
+  private async resolveSidLegacyFlow(ctx: Context, sidUrl: URL): Promise<URL | null> {
     const origin = sidUrl.origin;
     const headers = { 'User-Agent': UA, 'Accept': 'text/html,*/*' };
     try {

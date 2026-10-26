@@ -37,7 +37,7 @@ export class SSRmovies extends Source {
   public readonly label = 'SSRmovies';
   public readonly contentTypes: ContentType[] = ['movie', 'series'];
   public readonly countryCodes: CountryCode[] = [CountryCode.multi, CountryCode.hi];
-  public readonly baseUrl = 'https://ssrmovies.archi';
+  public readonly baseUrl = 'https://ssrmovies.com';
 
   private readonly fetcher: Fetcher;
 
@@ -123,14 +123,19 @@ export class SSRmovies extends Source {
     const nameClean = this.clean(name);
     const seasonRe = season ? new RegExp(`\\bS0?${season}\\b|\\bSeason\\s+${season}\\b`, 'i') : undefined;
 
+    // Post pages live on a rotating content mirror (currently ssrmovies.surf)
+    // while the search frontend is ssrmovies.com — accept both host families.
+    const postHostOk = (href: string): boolean =>
+      href.startsWith(`${this.baseUrl}/`) || /^https?:\/\/[a-z0-9.-]*ssrmovies\.[a-z.]+\//i.test(href);
+
     const candidates: { href: string; title: string }[] = [];
     $('a').each((_, el) => {
       const href = $(el).attr('href') ?? '';
       const title = $(el).text().trim();
-      if (!href.startsWith(`${this.baseUrl}/`) || title.length < 4) return;
+      if (!postHostOk(href) || title.length < 4) return;
       if (href.includes('/page/') || href.includes('/category/') || href.includes('/wp-') || href.endsWith('/feed/')) return;
       // Post slugs have at least one path segment beyond the root.
-      if (href.replace(`${this.baseUrl}/`, '').split('/').filter(Boolean).length < 1) return;
+      if (href.replace(/^https?:\/\/[^/]+\//, '').split('/').filter(Boolean).length < 1) return;
       candidates.push({ href, title });
     });
 

@@ -66,12 +66,15 @@ export class Kitsu extends Source {
   private async getEpisodes(ctx: Context, animeId: string, season?: number): Promise<string[]> {
     try {
       const url = new URL(`/api/edge/anime/${animeId}/episodes`, this.baseUrl);
-      url.searchParams.append('page[limit]', '100');
+      // API rejects page[limit] > 20 (400) since ~Oct 2026; follow links.next instead.
+      url.searchParams.append('page[limit]', '20');
 
       const episodes: string[] = [];
       let urlToFetch: URL | null = url;
+      let pages = 0;
 
-      while (urlToFetch) {
+      while (urlToFetch && pages < 10) {
+        pages++;
         const response = await this.fetcher.json(ctx, urlToFetch) as { data: any[]; links: { next: string | null } };
 
         for (const episode of response.data) {

@@ -90,6 +90,10 @@ const parseEpisode = (name) => {
     let m = base.match(/S\d{1,2}E(\d{1,3})/i);
     if (m?.[1])
         return parseInt(m[1], 10);
+    // "Berserk 1x01" — SxE naming some packs use
+    m = base.match(/\b\d{1,2}x(\d{1,3})\b/i);
+    if (m?.[1])
+        return parseInt(m[1], 10);
     m = base.match(/Episode\s*0*(\d{1,3})/i);
     if (m?.[1])
         return parseInt(m[1], 10);
@@ -98,6 +102,10 @@ const parseEpisode = (name) => {
         return parseInt(m[1], 10);
     // trailing " - 01" / " 01" (the common kayoanime "Show - NN.mkv" pattern)
     m = base.match(/[-\s]0*(\d{1,3})$/);
+    return m?.[1] ? parseInt(m[1], 10) : undefined;
+};
+const parseFileSeason = (name) => {
+    const m = name.replace(VIDEO_EXT_RE, '').match(/\b(\d{1,2})x\d{1,3}\b/i);
     return m?.[1] ? parseInt(m[1], 10) : undefined;
 };
 /** Build the public/cookie streamable Google Drive download URL for a file id. */
@@ -184,7 +192,8 @@ class Kayoanime extends Source_1.Source {
                 if (type === 'series') {
                     if (!episode)
                         continue;
-                    file = files.find(f => f.episode === episode);
+                    // SxE-named packs may hold several seasons in one folder — match both.
+                    file = files.find(f => f.episode === episode && (f.season === undefined || f.season === season));
                 }
                 else {
                     // Movie: pick the first video file (a movie folder normally holds a single file).
@@ -265,9 +274,19 @@ class Kayoanime extends Source_1.Source {
                 return;
             candidates.push({ href, slug, text: $(el).text() });
         });
+        // Post slugs reorder or rename the title ("kimetsu-no-yaiba-demon-slayer" vs TMDB
+        // "Demon Slayer: Kimetsu no Yaiba", "berserk-season-1-2-movies-memorial-edition" vs
+        // "Berserk: The Golden Age Arc – Memorial Edition"), so full-string containment misses
+        // them. Require the first name word plus a majority of the significant words.
+        const words = name.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
         for (const { href, slug, text } of candidates) {
             const combined = `${slug} ${text}`;
-            if (!this.clean(combined).includes(nameClean))
+            const combinedClean = this.clean(combined);
+            const hit = words.length
+                ? combinedClean.includes(this.clean(words[0]))
+                    && words.filter(w => combinedClean.includes(this.clean(w))).length >= Math.ceil(words.length / 2)
+                : combinedClean.includes(nameClean);
+            if (!hit)
                 continue;
             // Only full download posts (quality token in slug); skip per-episode subbed + news posts.
             if (!DOWNLOAD_SLUG_RE.test(slug))
@@ -275,7 +294,7 @@ class Kayoanime extends Source_1.Source {
             if (EPISODE_SUBBED_RE.test(slug))
                 continue;
             const yearMatch = combined.match(YEAR_RE);
-            if (year && yearMatch?.[0] && Math.abs(parseInt(yearMatch[0], 10) - year) > 1)
+            if (year && yearMatch?.[0] && Math.abs(parseInt(yearMatch?.[0], 10) - year) > 1)
                 continue;
             if (season !== undefined && !this.seasonMatches(combined, season))
                 continue;
@@ -409,7 +428,7 @@ class Kayoanime extends Source_1.Source {
             const name = ($(el).find('.flip-entry-title').first().text() || $(el).text()).trim();
             if (!VIDEO_EXT_RE.test(name))
                 return;
-            files.push({ id: m[1], name, episode: parseEpisode(name) });
+            files.push({ id: m[1], name, episode: parseEpisode(name), season: parseFileSeason(name) });
         });
         // De-duplicate by file id.
         const seen = new Set();

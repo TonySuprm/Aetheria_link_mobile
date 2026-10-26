@@ -10,7 +10,7 @@ const typedEntries = (obj) => Object.entries(obj);
 const buildManifest = (sources, extractors, config) => {
     const manifest = {
         id: (0, env_1.envGetAppId)(),
-        version: '0.73.2', // x-release-please-version
+        version: '0.74.0', // x-release-please-version
         name: `${(0, env_1.envGetAppName)()}${(0, config_1.getDebridSuffix)(config)}`,
         description: 'Resolves streaming sites into URLs',
         resources: [

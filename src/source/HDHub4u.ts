@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import { CheerioAPI } from 'cheerio';
 import { ContentType } from 'stremio-addon-sdk';
 import { Context, CountryCode, Meta } from '../types';
-import { DEAD_HUBCLOUD_HOSTS, Fetcher, findCountryCodes, findHeight, getImdbId, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id, ImdbId } from '../utils';
+import { DEAD_HUBCLOUD_HOSTS, Fetcher, filterHubHosts, findCountryCodes, findHeight, getImdbId, getTmdbId, getTmdbNameAndYear, HUB_HOST_PATTERN, Id, ImdbId } from '../utils';
 import { resolveRedirectUrl } from './hd-hub-helper';
 import { Source, SourceResult } from './Source';
 
@@ -197,6 +197,7 @@ export class HDHub4u extends Source {
   protected override readonly domainKey = 'hdhub';
 
   private readonly FALLBACK_CANDIDATES = [
+    'https://new8.hdhub4u.cl',
     'https://new1.hdhub4u.limo',
     'https://new1.hdhub4u.fo',
     'https://new2.hdhub4u.fo',
@@ -234,13 +235,17 @@ export class HDHub4u extends Source {
 
     const pageUrls = await this.fetchPageUrls(ctx, imdbId, id);
 
-    return deduplicateMirrorHosts(
-      deduplicateSourceResults(
-        (await Promise.all(
-          pageUrls.map(async (pageUrl) => {
-            return await this.handlePage(ctx, pageUrl, imdbId);
-          }),
-        )).flat(),
+    // HubCloud mirrors only (see filterHubHosts) — this source's non-hub mirrors are slow or
+    // dead, and hdhub4u regularly missed the first stream response because of them.
+    return filterHubHosts(
+      deduplicateMirrorHosts(
+        deduplicateSourceResults(
+          (await Promise.all(
+            pageUrls.map(async (pageUrl) => {
+              return await this.handlePage(ctx, pageUrl, imdbId);
+            }),
+          )).flat(),
+        ),
       ),
     );
   };
@@ -488,7 +493,7 @@ export class HDHub4u extends Source {
             })()
           ),
         )
-        .map(hit => new URL(hit.document.permalink, baseUrl));
+        .map(hit => this.rebasePermalink(hit.document.permalink, baseUrl));
     } catch {
       return [];
     }
@@ -553,10 +558,21 @@ export class HDHub4u extends Source {
           // Movies: reject series results when searching for a movie.
           return !/season\s+\d/i.test(title);
         })
-        .map(hit => new URL(hit.document.permalink, baseUrl));
+        .map(hit => this.rebasePermalink(hit.document.permalink, baseUrl));
     } catch {
       return [];
     }
+  };
+
+  /** Resolve a search-hit permalink against the live base. The Typesense index
+   *  keeps permalinks from older mirror domains (the .free TLD is dead) —
+   *  rebase those onto the resolved baseUrl so the post page stays fetchable. */
+  private readonly rebasePermalink = (permalink: string, baseUrl: URL): URL => {
+    const raw = new URL(permalink, baseUrl);
+    if (raw.hostname !== baseUrl.hostname && /hdhub4u\./.test(raw.hostname)) {
+      return new URL(`${raw.pathname}${raw.search}`, baseUrl);
+    }
+    return raw;
   };
 
   private static clean(str: string): string {

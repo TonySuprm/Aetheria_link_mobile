@@ -9,7 +9,8 @@ class VidVault extends Source_1.Source {
     label = 'VidVault';
     contentTypes = ['movie', 'series'];
     countryCodes = [types_1.CountryCode.multi, types_1.CountryCode.ru];
-    baseUrl = 'https://vidvault.ru';
+    // vidvault.ru 301s here since ~Oct 2026; only the API host matters (no web frontend).
+    baseUrl = 'https://vidvault.to';
     fetcher;
     UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
     get logger() {

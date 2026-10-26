@@ -114,6 +114,61 @@ export async function getBrowser(logger: winston.Logger): Promise<Browser> {
   return browser;
 }
 
+let headfulBrowser: Browser = null;
+let headfulBrowserPromise: Promise<Browser> | null = null;
+
+/**
+ * Headful (visible window) browser singleton. Some anti-bot widgets — notably
+ * Cloudflare Turnstile as used by HDEncode's Content Protector — refuse to run
+ * in headless Chrome but auto-solve in a real window. The window is parked
+ * off-screen so it does not steal focus on desktop hosts.
+ */
+export async function getHeadfulBrowser(logger: winston.Logger): Promise<Browser> {
+  if (headfulBrowser && headfulBrowser.connected) {
+    return headfulBrowser;
+  }
+
+  const puppeteer = loadPuppeteer();
+  if (!puppeteer) {
+    throw new Error('No browser automation on this host (puppeteer not installed) — source unavailable, try another');
+  }
+
+  if (!headfulBrowserPromise) {
+    headfulBrowserPromise = (async () => {
+      logger.info('Launching headful Puppeteer browser...');
+      let launchedBrowser: Browser;
+      try {
+        launchedBrowser = await puppeteer.launch({
+          ...DEFAULT_LAUNCH_OPTIONS,
+          headless: false,
+          args: [
+            ...DEFAULT_LAUNCH_OPTIONS.args,
+            '--window-position=-32000,-32000',
+            '--window-size=1280,900',
+          ],
+        });
+      } catch (error) {
+        headfulBrowserPromise = null;
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`Headful Puppeteer browser unavailable on this host: ${message}`);
+        throw new Error(`Headful Puppeteer browser unavailable on this host: ${message}`);
+      }
+      logger.info('Headful Puppeteer browser launched');
+
+      launchedBrowser.on('disconnected', () => {
+        logger.warn('Headful Puppeteer browser disconnected');
+        headfulBrowser = null;
+        headfulBrowserPromise = null;
+      });
+
+      return launchedBrowser;
+    })();
+  }
+
+  headfulBrowser = await headfulBrowserPromise;
+  return headfulBrowser;
+}
+
 export async function closeBrowser(logger: winston.Logger): Promise<void> {
   if (browser) {
     logger.info('Closing Puppeteer browser...');
@@ -175,7 +230,10 @@ export async function puppeteerFetch(
     }
 
     if (waitForFunction) {
-      await page.waitForFunction(waitForFunction, {}, { timeout: timeout ?? 30000 });
+      // 2nd arg is the options bag; 3rd would be predicate args. The string must
+      // be an expression returning a boolean (a bare `() => …` arrow evaluates to
+      // a truthy function object and resolves the wait immediately).
+      await page.waitForFunction(waitForFunction, { timeout: timeout ?? 30000 });
     }
 
     if (evaluate) {
@@ -289,7 +347,8 @@ export async function puppeteerFetchWithFlareSolverr(
     }
 
     if (options.waitForFunction) {
-      await page.waitForFunction(options.waitForFunction, {}, { timeout: options.timeout ?? 60000 });
+      // 2nd arg is the options bag; 3rd would be predicate args (see note above).
+      await page.waitForFunction(options.waitForFunction, { timeout: options.timeout ?? 60000 });
     }
 
     if (options.evaluate) {

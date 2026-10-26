@@ -1,6 +1,6 @@
 import { ContentType } from 'stremio-addon-sdk';
 import { Context, CountryCode } from '../types';
-import { Fetcher, findHeight, Id } from '../utils';
+import { Fetcher, findHeight, getHeadfulBrowser, Id } from '../utils';
 import { Source, SourceResult } from './Source';
 
 interface VidApiConfig {
@@ -22,6 +22,27 @@ interface StreamDataResponse {
   };
 }
 
+interface PlayerSession {
+  config: VidApiConfig;
+  cookieHeader?: string;
+}
+
+/** Solved player sessions (Turnstile pass + CONFIG + cookies), cached so repeat
+ *  requests skip the expensive headful solve (which the site rate-limits). */
+const playerSessionCache = new Map<string, { session: PlayerSession; ts: number }>();
+const PLAYER_SESSION_TTL = 30 * 60 * 1000; // 30 min (playToken longevity is unknown; stay conservative)
+
+const PLAYER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36';
+
+/** Serializes headful solves — the site rate-limits Turnstile solves per IP, so two
+ *  concurrent requests (e.g. movie + series probes) must not solve at once. */
+let solveChain: Promise<unknown> = Promise.resolve();
+const runSolveExclusive = async <T>(task: () => Promise<T>): Promise<T> => {
+    const run = solveChain.then(task, task);
+    solveChain = run.catch(() => { /* keep the chain alive for the next waiter */ });
+    return run;
+};
+
 export class ImdbSu extends Source {
     public override readonly id = 'imdbsu';
     public override readonly label = 'ImdbSu';
@@ -34,6 +55,85 @@ export class ImdbSu extends Source {
     public constructor(fetcher: Fetcher) {
         super();
         this.fetcher = fetcher;
+    }
+
+    /**
+     * Get a solved player session (CONFIG + cookies). Fast path: plain GET of the player
+     * page (rarely works — it normally serves a Turnstile gate). Slow path: headful
+     * browser with the embed referer; the Cloudflare Turnstile widget auto-solves there
+     * and the page reloads with the verified session, after which CONFIG is present.
+     * The subsequent streamData API call must carry the browser's ts_pass/session cookies.
+     */
+    private async getPlayerSession(ctx: Context, playerUrl: URL, embedUrl: string): Promise<PlayerSession | undefined> {
+        const cached = playerSessionCache.get(playerUrl.href);
+        if (cached && Date.now() - cached.ts < PLAYER_SESSION_TTL) {
+            return cached.session;
+        }
+
+        const logger = this.fetcher.getLogger();
+
+        // 1) plain fetch
+        try {
+            const html = await this.fetcher.text(ctx, playerUrl, {
+                headers: { Referer: embedUrl, 'User-Agent': PLAYER_UA },
+                timeout: 8000,
+            });
+            const config = this.parseConfig(html);
+            if (config?.streamDataApiUrl && config.mediaId) {
+                return { config };
+            }
+        } catch { /* fall through to headful */ }
+
+        // 2) headful solve. The page reloads itself mid-solve, so CONFIG polls must
+        //    survive "execution context destroyed".
+        if (ctx.streamDeadline && Date.now() > ctx.streamDeadline - 30000) {
+            logger.info(`ImdbSu: skipping headful solve — stream deadline too close`, ctx);
+            return undefined;
+        }
+
+        const solve = async (): Promise<PlayerSession | undefined> => {
+            const browser = await getHeadfulBrowser(logger);
+            const page = await browser.newPage();
+            try {
+                await page.setViewport({ width: 1280, height: 900 });
+                await page.evaluateOnNewDocument(() => {
+                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    // @ts-expect-error - window.chrome is not typed
+                    window.chrome = { runtime: {} };
+                });
+                await page.goto(playerUrl.href, { waitUntil: 'domcontentloaded', timeout: 45000, referer: embedUrl });
+
+                // Turnstile auto-solves in headful; the page then reloads itself with the
+                // verified session and CONFIG appears. waitForFunction survives that navigation.
+                // (String IIFE — no DOM types are compiled in this project. A bare `() => …`
+                // string would evaluate to a truthy function object and resolve instantly,
+                // so the wait must be an expression returning a boolean.)
+                await page
+                    .waitForFunction('(() => /const\\s+CONFIG\\s*=/.test(document.documentElement.innerHTML))()', { timeout: 55000 })
+                    .catch(() => { /* timed out — report below */ });
+                const html = await page.content();
+                const configMatch = html.match(/const\s+CONFIG\s*=\s*({[\s\S]*?});/);
+                if (!configMatch?.[1]) {
+                    logger.info(`ImdbSu: headful solve produced no CONFIG for ${playerUrl.href} (rate-limited?)`, ctx);
+                    return undefined;
+                }
+
+                const config = JSON.parse(configMatch[1]) as VidApiConfig;
+                if (!config?.streamDataApiUrl || !config.mediaId) return undefined;
+
+                // The streamData API validates the Turnstile-pass cookies from this session.
+                const cookies = await page.cookies();
+                const cookieHeader = cookies.map((c: { name: string; value: string }) => `${c.name}=${c.value}`).join('; ');
+                const session: PlayerSession = { config, cookieHeader };
+                playerSessionCache.set(playerUrl.href, { session, ts: Date.now() });
+                return session;
+            } finally {
+                await page.close().catch(() => { /* already closed */ });
+            }
+        };
+
+        // One solve at a time — concurrent solves trip the site's per-IP Turnstile limit.
+        return await runSolveExclusive(solve);
     }
 
     public override async handleInternal(ctx: Context, type: string, id: Id): Promise<SourceResult[]> {
@@ -71,28 +171,24 @@ export class ImdbSu extends Source {
         }
         const playerUrl = new URL(iframeMatch[1]);
 
-        // 2) Load the nextgen player page so we can read CONFIG.
-        let playerHtml: string;
-        try {
-            playerHtml = await this.fetcher.text(ctx, playerUrl, {
-                headers: { Referer: embedUrl },
-                timeout: 8000,
-            });
-        } catch (err) {
-            this.fetcher.getLogger().warn(`ImdbSu: failed to load player page ${playerUrl.href}: ${err}`, ctx);
+        // 2) Read CONFIG from the player page (plain fetch first, headful Turnstile
+        //    solve as fallback — see getPlayerSession).
+        const session = await this.getPlayerSession(ctx, playerUrl, embedUrl);
+        if (!session) {
+            this.fetcher.getLogger().info(`ImdbSu: no CONFIG found in ${playerUrl.href}`, ctx);
             return [];
         }
-
-        const config = this.parseConfig(playerHtml);
-        if (!config?.streamDataApiUrl || !config.mediaId) {
-            this.fetcher.getLogger().info(`ImdbSu: no CONFIG found in ${playerUrl.href}`, ctx);
+        const config = session.config;
+        if (!config.streamDataApiUrl || !config.mediaId) {
+            this.fetcher.getLogger().info(`ImdbSu: incomplete CONFIG in ${playerUrl.href}`, ctx);
             return [];
         }
 
         // 3) Hit the streamData API with the correct referer. The API expects the id
         // in the query string (imdb=... or tmdb=...) plus type and, for TV, season/episode.
+        // It validates the Turnstile-pass cookies from the solved session, so forward them.
         const streamDataUrl = new URL(config.streamDataApiUrl);
-        streamDataUrl.searchParams.set(config.idType === 'tmdb' ? 'tmdb' : 'imdb', config.mediaId);
+        streamDataUrl.searchParams.set(config.idType === 'tmdb' ? 'tmdb' : 'imdb', config.mediaId ?? '');
         streamDataUrl.searchParams.set('type', isTv ? 'tv' : 'movie');
         if (isTv && config.season != null && config.episode != null) {
             streamDataUrl.searchParams.set('season', String(config.season));
@@ -103,7 +199,11 @@ export class ImdbSu extends Source {
         let dataText: string;
         try {
             dataText = await this.fetcher.text(ctx, streamDataUrl, {
-                headers: { Referer: `${playerUrl.origin}/` },
+                headers: {
+                    Referer: `${playerUrl.origin}/`,
+                    'User-Agent': PLAYER_UA,
+                    ...(session.cookieHeader && { Cookie: session.cookieHeader }),
+                },
                 timeout: 8000,
             });
         } catch (err) {

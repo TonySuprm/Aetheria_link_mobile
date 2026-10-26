@@ -72,7 +72,8 @@ export class StreamResolver {
     sources: Source[],
     type: ContentType,
     id: Id,
-    onProgress?: (completedSources: number, totalSources: number, label: string) => void
+    onProgress?: (completedSources: number, totalSources: number, label: string) => void,
+    onPartial?: (streams: Stream[]) => void
   ): Promise<ResolveResponse> {
     // Publish the response deadline so lazy extractors can bound their prewarm-await by the
     // remaining time — a source that finishes its scrape near the deadline must still return its
@@ -172,6 +173,15 @@ export class StreamResolver {
         completedSources++;
         if (onProgress) {
           onProgress(completedSources, sources.length, source.label);
+        }
+        // Publish the streams resolved SO FAR so the app's /progress poll can
+        // render links per source while the scrape is still running (the full
+        // response only arrives at the deadline). Partial builds skip the
+        // expensive dedup/dead-link passes — the app dedupes by URL anyway.
+        if (onPartial) {
+          try {
+            onPartial(this.buildPartialStreams(urlResults, ctx));
+          } catch { /* partial stream snapshot is best-effort */ }
         }
       }
     };
@@ -373,7 +383,31 @@ export class StreamResolver {
 
   private arraysIntersect<T>(arr1: T[], arr2: T[]): boolean {
     return arr1.filter(item => arr2.includes(item)).length > 0;
-  }
+  };
+
+  /**
+   * Snapshot of the streams resolved so far, in the exact shape the final
+   * response uses (same name/title/URL builders) minus the cross-source
+   * dedup, resolution-exclusion re-sort and dead-link probe. Only successful,
+   * non-error results are included; exact-duplicate URLs collapse to one.
+   */
+  private buildPartialStreams(urlResults: UrlResult[], ctx: Context): Stream[] {
+    const seenUrls = new Set<string>();
+    const partial: Stream[] = [];
+    for (const urlResult of urlResults) {
+      if (urlResult.error || isResolutionExcluded(ctx.config, getClosestResolution(urlResult.meta?.height))) continue;
+      const href = urlResult.url.href;
+      if (seenUrls.has(href)) continue;
+      seenUrls.add(href);
+      partial.push({
+        ...this.buildUrl(urlResult),
+        name: this.buildName(ctx, urlResult),
+        title: this.buildTitle(ctx, urlResult),
+      });
+      if (partial.length >= 80) break;
+    }
+    return partial;
+  };
 
   private determineTtl(urlResults: UrlResult[]): number | undefined {
     if (!urlResults.length) {
@@ -586,13 +620,28 @@ export class StreamResolver {
     // dl.dramasuki.xyz/.../<file>.mkv). Those hosts serve the raw file from a Google-Drive-backed
     // goindex and REJECT any request whose URL carries a # fragment (returning 403). The file
     // extension is already in the path there, so the synthetic label adds nothing useful.
+    // External players name the file after the #stream_label fragment, so put the
+    // title in every URL the player sees: series as Show.Name-SxxEyy, movies as
+    // their full sanitized meta title (quality included). Skipped only for raw
+    // direct-video-file URLs — those hosts reject fragmented URLs (403) and their
+    // path already names the file. Extract-proxy URLs carry it fine (fragments are
+    // client-side and never hit the server).
     const isDirectVideoFile = DIRECT_VIDEO_FILE_RE.test(finalUrl.pathname);
-    const isExtractProxy = finalUrl.pathname.includes('/extract/');
-    const titleMatch = urlResult.meta?.title?.match(/(.*?)\sS(\d+)E(\d+)/);
-    if (titleMatch && titleMatch[1] && titleMatch[2] && titleMatch[3] && !isDirectVideoFile && !isExtractProxy) {
-      const showName = titleMatch[1].trim().replace(/[^a-zA-Z0-9]/g, '_');
-      const targetExt = finalUrl.pathname.includes('.m3u8') || finalUrl.pathname.includes('/hls/') || urlResult.meta?.title?.includes('HLS') ? '.m3u8' : '.mp4';
-      finalUrl.hash = `stream_label=${showName}-S${titleMatch[2]}E${titleMatch[3]}${targetExt}`;
+    const rawTitle = urlResult.meta?.title?.trim() ?? '';
+    // HLS stays .m3u8; otherwise prefer the release's own extension (".mkv" titles mean the file
+    // IS an mkv) and fall back to .mp4.
+    const origExt = rawTitle.match(/\.(mkv|mp4|avi|mov|webm|m4v)$/i)?.[1]?.toLowerCase();
+    const targetExt = finalUrl.pathname.includes('.m3u8') || finalUrl.pathname.includes('/hls/') || rawTitle.includes('HLS') ? '.m3u8'
+      : (origExt ? `.${origExt}` : '.mp4');
+    const episodeMatch = rawTitle.match(/(.*?)\sS(\d+)E(\d+)/);
+    // Titles often already end in the release's extension ("...CiNEPHiLES.mkv") — strip it so the
+    // label doesn't end up ".mkv.mp4"; the extension is re-appended once at the end.
+    const stripTrailingExt = (s: string): string => s.replace(/\.(mkv|mp4|avi|mov|webm|m4v)$/i, '');
+    const streamLabel = episodeMatch && episodeMatch[1]
+      ? stripTrailingExt(`${episodeMatch[1].trim().replace(/[^a-zA-Z0-9]+/g, '.')}-S${episodeMatch[2]}E${episodeMatch[3]}`)
+      : stripTrailingExt(rawTitle.replace(/[^a-zA-Z0-9]+/g, '.').replace(/^\.+|\.+$/g, ''));
+    if (streamLabel && streamLabel.length > 3 && !isDirectVideoFile) {
+      finalUrl.hash = `stream_label=${streamLabel}${targetExt}`;
     }
 
     if (!urlResult.isExternal) {

@@ -213,6 +213,7 @@ class HDHub4u extends Source_1.Source {
     baseUrl = 'https://new1.hdhub4u.limo';
     domainKey = 'hdhub';
     FALLBACK_CANDIDATES = [
+        'https://new8.hdhub4u.cl',
         'https://new1.hdhub4u.limo',
         'https://new1.hdhub4u.fo',
         'https://new2.hdhub4u.fo',
@@ -243,9 +244,11 @@ class HDHub4u extends Source_1.Source {
     async handleInternal(ctx, _type, id) {
         const imdbId = await (0, utils_1.getImdbId)(ctx, this.fetcher, id);
         const pageUrls = await this.fetchPageUrls(ctx, imdbId, id);
-        return deduplicateMirrorHosts(deduplicateSourceResults((await Promise.all(pageUrls.map(async (pageUrl) => {
+        // HubCloud mirrors only (see filterHubHosts) — this source's non-hub mirrors are slow or
+        // dead, and hdhub4u regularly missed the first stream response because of them.
+        return (0, utils_1.filterHubHosts)(deduplicateMirrorHosts(deduplicateSourceResults((await Promise.all(pageUrls.map(async (pageUrl) => {
             return await this.handlePage(ctx, pageUrl, imdbId);
-        }))).flat()));
+        }))).flat())));
     }
     ;
     /** Collect unique redirect links (gadgetsweb/4khdhub) from a cheerio instance, preserving the
@@ -462,7 +465,7 @@ class HDHub4u extends Source_1.Source {
                         }
                         return false;
                     })()))
-                .map(hit => new URL(hit.document.permalink, baseUrl));
+                .map(hit => this.rebasePermalink(hit.document.permalink, baseUrl));
         }
         catch {
             return [];
@@ -523,11 +526,21 @@ class HDHub4u extends Source_1.Source {
                 // Movies: reject series results when searching for a movie.
                 return !/season\s+\d/i.test(title);
             })
-                .map(hit => new URL(hit.document.permalink, baseUrl));
+                .map(hit => this.rebasePermalink(hit.document.permalink, baseUrl));
         }
         catch {
             return [];
         }
+    };
+    /** Resolve a search-hit permalink against the live base. The Typesense index
+     *  keeps permalinks from older mirror domains (the .free TLD is dead) —
+     *  rebase those onto the resolved baseUrl so the post page stays fetchable. */
+    rebasePermalink = (permalink, baseUrl) => {
+        const raw = new URL(permalink, baseUrl);
+        if (raw.hostname !== baseUrl.hostname && /hdhub4u\./.test(raw.hostname)) {
+            return new URL(`${raw.pathname}${raw.search}`, baseUrl);
+        }
+        return raw;
     };
     static clean(str) {
         return str.toLowerCase().replace(/[^a-z0-9]/g, '');

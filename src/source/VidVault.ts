@@ -9,7 +9,8 @@ export class VidVault extends Source {
     public readonly label = 'VidVault';
     public readonly contentTypes: ContentType[] = ['movie', 'series'];
     public readonly countryCodes: CountryCode[] = [CountryCode.multi, CountryCode.ru];
-    public readonly baseUrl = 'https://vidvault.ru';
+    // vidvault.ru 301s here since ~Oct 2026; only the API host matters (no web frontend).
+    public readonly baseUrl = 'https://vidvault.to';
 
     private readonly fetcher: Fetcher;
     private readonly UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';

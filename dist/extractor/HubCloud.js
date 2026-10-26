@@ -86,7 +86,7 @@ const REDIRECT_STRATEGIES = [
 class HubCloud extends Extractor_1.Extractor {
     id = 'hubcloud';
     label = 'HubCloud';
-    cacheVersion = 12;
+    cacheVersion = 13;
     ttl = utils_1.HUBCLOUD_CACHE_TTL;
     supports(_ctx, url) {
         return utils_1.HUB_HOST_PATTERN.test(url.hostname);

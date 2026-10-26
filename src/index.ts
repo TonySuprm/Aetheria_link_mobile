@@ -19,7 +19,7 @@ import { MostraGuarda } from './source/MostraGuarda';
 // import { XYZ111477 } from './source/XYZ111477'; // Disabled per user request
 import type { Context } from './types';
 import { clearCache, contextFromRequestAndResponse, ensureEmbeddedMediaFlowProxy, envGet, envIsProd, Fetcher, getBrowser, startMediaFlowWatchdog, StreamResolver } from './utils';
-import { embeddedMediaFlowAvailable, EMBEDDED_MEDIAFLOW_URL, getConfigWithEnvFallback } from './utils/config';
+import { embeddedMediaFlowAvailable, EMBEDDED_MEDIAFLOW_URL, getConfigWithEnvFallback, isSourceDisabled } from './utils/config';
 import { setSyncedConfig } from './utils/syncedConfig';
 
 if (envIsProd()) {
@@ -114,6 +114,35 @@ const extractors = createExtractors(fetcher, logger);
 const addon = express();
 addon.set('trust proxy', true);
 addon.use(express.json());
+
+// ── CORS — MUST be the first middleware ─────────────────────────────
+// Express terminates the chain at the first matching ROUTE, so any
+// addon.get() registered before a middleware never sees it. These routes
+// (/sources, /config, /app-sync, /donghua-*, /stats…) are registered as
+// direct routes below, so this middleware has to come FIRST or their
+// responses ship without Access-Control-Allow-Origin and the Niphelheim
+// WebView (https://localhost) blocks them as CORS failures — "Failed to
+// fetch" on the Addons screen even though curl sees a healthy 200.
+addon.options('*', (_req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.status(204).end();
+});
+
+addon.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Request-ID', randomUUID());
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+
+  if (envIsProd()) {
+    res.setHeader('Cache-Control', 'public, max-age=10');
+  }
+
+  next();
+});
+
 addon.use('/public', express.static('public'));
 
 let pendingSyncConfig: any = null;
@@ -214,6 +243,24 @@ addon.get('/config', (_req, res) => {
   res.json(lastSyncedConfig && Object.keys(lastSyncedConfig).length > 0 ? getConfigWithEnvFallback(lastSyncedConfig) : {});
 });
 
+// Source registry for the Niphelheim app's Sources screen: every scraper with
+// its id, label, category (debrid/hollywood/asiandrama/anime/donghua) and the
+// CURRENT enabled state from the effective config. The app toggles via
+// POST /app-sync with disableSource_<id> keys (same contract as the webui).
+addon.get('/sources', (_req, res) => {
+  const effective = getConfigWithEnvFallback(lastSyncedConfig || {});
+  res.json({
+    sources: sources.map((s) => ({
+      id: s.id,
+      label: s.label,
+      category: s.category,
+      contentTypes: s.contentTypes,
+      countryCodes: s.countryCodes,
+      disabled: isSourceDisabled(effective, s),
+    })),
+  });
+});
+
 import { execSync } from 'node:child_process';
 addon.get('/debug-mediaflow', (_req, res) => {
   try {
@@ -235,23 +282,23 @@ addon.get('/', (_req, res) => {
 
 if (envIsProd()) {
   // The MediaFlow Proxy relay (/proxy/*, /extractor/*, /_token_/*) streams
-  // video: a player easily exceeds 30 segment/playlist requests per minute,
-  // so exempt it.
-  addon.use(rateLimit({ windowMs: 60 * 1000, limit: 30, skip: (req) => req.path.startsWith('/proxy/') || req.path.startsWith('/extractor/') || req.path.startsWith('/_token_') }));
+  // video: a player easily exceeds 30 segment/playlist requests per minute.
+  // Local control endpoints are exempt too: the app's progress ticker polls
+  // every 700ms and AddonsScreen polls /sources+/config, which otherwise
+  // exhausts the 30/min window and breaks the whole settings screen.
+  // Control endpoints are usually requested under a CONFIG-PREFIXED path
+  // (/{encoded-config}/progress/..., /{encoded-config}/stream/...) by the
+  // Niphelheim app, so a plain startsWith('/progress') check misses them and
+  // the 700ms progress ticker alone exhausts the whole 30/min window — which
+  // then 429s the stream request itself. Match anywhere in the path.
+  // (Runs AFTER the CORS middleware above, so even a 429 carries ACAO.)
+  const CONTROL_SEGMENTS = ['/progress/', '/sources', '/config', '/app-sync', '/ready', '/startup', '/stats', '/donghua'];
+  const controlSkip = (req: Request) => req.path.startsWith('/proxy/') || req.path.startsWith('/extractor/') || req.path.startsWith('/_token_')
+    || req.path === '/progress' || req.path === '/sources' || req.path === '/config'
+    || req.path === '/app-sync' || req.path === '/ready' || req.path === '/startup' || req.path === '/stats'
+    || CONTROL_SEGMENTS.some((seg) => req.path.includes(seg));
+  addon.use(rateLimit({ windowMs: 60 * 1000, limit: 30, skip: controlSkip }));
 }
-
-addon.use((_req: Request, res: Response, next: NextFunction) => {
-  res.setHeader('X-Request-ID', randomUUID());
-
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-
-  if (envIsProd()) {
-    res.setHeader('Cache-Control', 'public, max-age=10');
-  }
-
-  next();
-});
 
 const extractorRegistry = new ExtractorRegistry(logger, extractors);
 

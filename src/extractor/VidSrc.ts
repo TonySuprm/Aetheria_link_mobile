@@ -55,7 +55,17 @@ export class VidSrc extends Extractor {
 
     const $ = cheerio.load(html.replace(/<!--/g, '').replace(/-->/g, '')); // server HTML is commented-out
 
-    const iframeUrl = new URL(($('#player_iframe').attr('src') as string).replace(/^\/\//, 'https://'));
+    // The iframe's src is injected by the page's JS bundle on the current VidSrc build — a plain
+    // HTTP fetch sees an iframe without src (or no iframe at all, e.g. block pages). Treat both as
+    // a dead domain and fall through to the next one instead of crashing on undefined.
+    const iframeSrc = $('#player_iframe').attr('src');
+    if (!iframeSrc) {
+      if (domains.length) {
+        return this.extractUsingRandomDomain(ctx, url, meta, domains);
+      }
+      throw new NotFoundError('No player iframe found (VidSrc pages now build the player with JS)');
+    }
+    const iframeUrl = new URL(iframeSrc.replace(/^\/\//, 'https://'));
     const title = $('title').text().trim();
 
     const servers = $('.server')

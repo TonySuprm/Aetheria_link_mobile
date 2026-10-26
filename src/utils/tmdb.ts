@@ -292,3 +292,10 @@ export const getTmdbEpisodeAirDate = async (ctx: Context, fetcher: Fetcher, tmdb
 
   return response.air_date;
 };
+
+export const getTmdbMovieReleaseDate = async (ctx: Context, fetcher: Fetcher, tmdbId: TmdbId, language?: string): Promise<string | undefined> => {
+  if (tmdbId.season) return undefined;
+
+  const details = await getTmdbMovieDetails(ctx, fetcher, tmdbId, language);
+  return details.release_date || undefined;
+};

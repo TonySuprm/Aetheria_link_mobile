@@ -45,7 +45,7 @@ const Source_1 = require("./Source");
 const SIZE_RE = /\[?\s*([\d.]+)\s*(GB|MB)\s*\]?/i;
 const YEAR_RE = /\b(19[89]\d|20\d{2})\b/g;
 const YEAR_RANGE_RE = /\((\d{4})\s*-\s*(\d{4})\)/;
-const SID_HOST = 'cloud.unblockedgames.world';
+const SID_HOST = 'thenaukriadda.in';
 const clean = (str) => str.toLowerCase().replace(/\s*&\s*/g, 'and').replace(/[^a-z0-9]/g, '');
 const parseHeight = (text) => {
     if (/2160p|4k/i.test(text))
@@ -108,7 +108,7 @@ class UHDMovies extends Source_1.Source {
     label = 'UHDMovies';
     contentTypes = ['movie', 'series'];
     countryCodes = [types_1.CountryCode.multi, types_1.CountryCode.hi, types_1.CountryCode.en];
-    baseUrl = 'https://uhdmovies.casa';
+    baseUrl = 'https://uhdmovies.us.org';
     fetcher;
     constructor(fetcher) {
         super();

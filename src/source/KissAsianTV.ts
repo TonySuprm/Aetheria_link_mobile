@@ -81,6 +81,12 @@ export class KissAsianTV extends Source {
                         const s = $d(el).attr('src')?.trim();
                         if (s) fetchedIframes.push(s);
                     });
+                    // Embedded server-list players (e.g. zumivids) expose each host as a
+                    // <li data-video="..."> option, not an iframe.
+                    $d('[data-video]').each((_, el) => {
+                        const s = $d(el).attr('data-video')?.trim();
+                        if (s && /^https?:/.test(s)) fetchedIframes.push(s);
+                    });
                 } catch (e) { }
             }));
 
