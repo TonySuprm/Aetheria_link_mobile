@@ -20,10 +20,10 @@ export const DAILYMOTION_METADATA_HEADERS = { 'User-Agent': BROWSER_UA, 'Referer
  * A manifest URL baked into the stream response at /stream time is usually already dead by the
  * time the player presses play ("works once, then never again"). Instead the extractor returns a
  * lightweight play-time resolver URL on this add-on (`/dm/<videoId>.m3u8`, served by
- * MediaFlowProxyController). When the player requests it, the add-on fetches a FRESH manifest
- * token from the metadata API and 302-redirects to the MediaFlow HLS proxy with that fresh
- * manifest — every play gets a brand-new token, which also keeps the per-link rate-limit budget
- * to exactly one fetch per actual playback.
+ * MediaFlowProxyController). When the player requests it, the add-on resolves the video through
+ * Dailymotion's mobile app API (no yt-dlp) and serves a REWRITTEN master playlist whose variants
+ * stream through MediaFlow — every play gets a fresh manifest, and the player only ever touches
+ * this add-on's origin with plain, header-free HLS.
  */
 export class Dailymotion extends Extractor {
   public readonly id = 'dailymotion';

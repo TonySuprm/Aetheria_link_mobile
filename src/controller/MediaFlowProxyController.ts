@@ -1,12 +1,13 @@
+import { existsSync } from 'node:fs';
 import { Agent as HttpAgent, request as httpRequest } from 'node:http';
 import type { IncomingMessage } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
+import path from 'node:path';
 import { Request, Response, Router } from 'express';
 import winston from 'winston';
-import { envGet } from '../utils';
-import path from 'node:path';
-import { existsSync } from 'node:fs';
 import { DAILYMOTION_METADATA_HEADERS, pickDailymotionMasterHls } from '../extractor/Dailymotion';
+import { envGet } from '../utils';
+import { DAILYMOTION_APP_HEADERS, fetchDailymotionAppHlsUrl, fetchDailymotionText, rewriteDailymotionMaster } from '../utils/dailymotion';
 
 /**
  * MediaFlow Proxy relay.
@@ -151,8 +152,9 @@ export class MediaFlowProxyController {
     // Play-time Dailymotion resolver: the /stream response hands players this
     // URL (no dailymotion calls are made at stream-resolution time — the CDN
     // sec= token would be stale and the per-link rate limit wasted). When the
-    // player requests it, a FRESH manifest token is fetched and the player is
-    // 302-redirected to the MediaFlow HLS proxy with that fresh manifest.
+    // player requests it, the video is resolved through Dailymotion's mobile
+    // app API and served as a REWRITTEN master playlist whose variants stream
+    // through the MediaFlow relay (see resolveViaDailymotionAppApi).
     const dmHandler = this.dailymotionResolver.bind(this);
     this.router.get('/dm/:videoId.m3u8', dmHandler);
     this.router.get('/dm/:videoId', dmHandler);
@@ -175,18 +177,22 @@ export class MediaFlowProxyController {
   /**
    * Play-time Dailymotion resolver (GET /dm/:videoId.m3u8).
    *
-   * DEFAULT (dmViaYtdlp): 302 to the on-device ytdlp bridge
-   * (`<host>/s/ytdlp/dm/fetch`), which resolves the video through yt-dlp,
-   * fetches manifest/variants/segments through yt-dlp's own networking, and
-   * rewrites every dailymotion URL to itself. This replaced the MediaFlow
-   * metadata chain because Dailymotion's CDN started returning 403 E005
-   * (non-browser TLS fingerprint) to MFP's rustls client — while yt-dlp's
-   * networking still passes. Bonus: yt-dlp exposes the 4K/AV1 ladders and
-   * caches resolutions for 5h instead of one metadata hit per play.
+   * DEFAULT (mobile app API): resolve the video through Dailymotion's iOS-app GraphQL
+   * API (no yt-dlp), fetch the `hlsURL` master with the app User-Agent (the ONLY
+   * client class Dailymotion's /cdn/manifest route accepts — browser and MediaFlow's
+   * rustls UAs both get 403 there), then serve the master REWRITTEN: every variant
+   * URI is re-based onto the MediaFlow HLS proxy (which streams the dmcdn variants +
+   * segments with its header injection — verified reachable by MediaFlow, unlike the
+   * master host). The player only ever sees plain header-free URLs on this add-on's
+   * origin, which is what Samsung Tizen and every other normal player need.
+   * DM_MAX_HEIGHT caps the ladder (2160 = full 4K), DM_FLAT=1 (default) keeps only
+   * the top variant so playback starts at 4K immediately.
    *
-   * FALLBACK (DM_VIA_YTDLP=0): the original MediaFlow metadata path — fetch a
-   * fresh `sec=` token via MFP and 302 to the MFP HLS proxy. Kept behind a
-   * kill-switch in case the bridge is unavailable.
+   * FALLBACK (DM app API refused the video): the original MediaFlow metadata path —
+   * fetch a fresh `sec=` token via MFP and 302 to the MFP HLS proxy.
+   *
+   * LEGACY (DM_VIA_YTDLP=1, opt-in): 302 to the on-device ytdlp bridge. Kept behind
+   * the kill-switch for deployments that still run one; the public bridge is gone.
    */
   private dailymotionResolver(req: Request, res: Response): void {
     const videoId = String(req.params['videoId'] || '').replace(/\.m3u8$/i, '');
@@ -195,7 +201,7 @@ export class MediaFlowProxyController {
       return;
     }
 
-    if (envGet('DM_VIA_YTDLP') !== '0') {
+    if (envGet('DM_VIA_YTDLP') === '1') {
       const base = ytdlpPublicBase(req);
       const target = `https://www.dailymotion.com/video/${videoId}`;
       const max = dmMaxHeight();
@@ -206,6 +212,47 @@ export class MediaFlowProxyController {
       return;
     }
 
+    void this.resolveViaDailymotionAppApi(req, res, videoId);
+  }
+
+  /** Mobile-app-API path of `dailymotionResolver` — always terminates the response
+   *  (200 rewritten master, or nothing when the caller should fall back). */
+  private async resolveViaDailymotionAppApi(req: Request, res: Response, videoId: string): Promise<void> {
+    try {
+      const hlsUrl = await fetchDailymotionAppHlsUrl(videoId);
+      if (hlsUrl) {
+        const master = await fetchDailymotionText(hlsUrl);
+        if (master && master.status === 200 && master.text.startsWith('#EXTM3U')) {
+          const maxHeight = dmMaxHeight();
+          const rewritten = rewriteDailymotionMaster({
+            master: master.text,
+            hlsUrl,
+            maxHeight,
+            flat: envGet('DM_FLAT') !== '0',
+            rewriteUrl: url => this.hlsProxyUrlFor(req, url, DAILYMOTION_APP_HEADERS),
+          });
+          this.logger.info(`Dailymotion ${videoId}: serving app-API master via MediaFlow (flat=${envGet('DM_FLAT') !== '0'}, maxHeight=${maxHeight})`);
+          res.status(200)
+            .setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+            .setHeader('Cache-Control', 'no-store')
+            .end(rewritten);
+          return;
+        }
+        this.logger.warn(`Dailymotion app-API master fetch failed for ${videoId} (status ${master?.status ?? 'none'}) — falling back to the metadata path`);
+      } else {
+        this.logger.warn(`Dailymotion app-API resolution refused ${videoId} — falling back to the metadata path`);
+      }
+    } catch (err) {
+      this.logger.warn(`Dailymotion app-API resolution error for ${videoId}: ${err instanceof Error ? err.message : err} — falling back to the metadata path`);
+    }
+
+    this.resolveViaDailymotionMetadata(req, res, videoId);
+  }
+
+  /** Legacy metadata-API path: fresh `sec=` token via MFP, then 302 into the MFP HLS
+   *  proxy. Only works while Dailymotion serves cdndirector manifests to MediaFlow's
+   *  TLS client (currently 403 E005) — kept as a last-resort fallback. */
+  private resolveViaDailymotionMetadata(req: Request, res: Response, videoId: string): void {
     const metadataUrl = new URL(`https://www.dailymotion.com/player/metadata/video/${videoId}`);
 
     // The manifest `sec=` token is bound to the IP that fetched the metadata.
@@ -243,7 +290,9 @@ export class MediaFlowProxyController {
 
           let data = '';
           upstreamRes.setEncoding('utf8');
-          upstreamRes.on('data', (c: string) => { data += c; });
+          upstreamRes.on('data', (c: string) => {
+            data += c;
+          });
           upstreamRes.on('end', () => {
             let master: URL | undefined;
             try {
@@ -286,7 +335,7 @@ export class MediaFlowProxyController {
 
   /** MediaFlow HLS-proxy URL for `master`, built on the PUBLIC host the player used
    *  (x-forwarded aware, honours x-forwarded-prefix for reverse-proxied mounts). */
-  private hlsProxyUrlFor(req: Request, master: URL): URL {
+  private hlsProxyUrlFor(req: Request, master: URL, headers: Record<string, string> = DAILYMOTION_METADATA_HEADERS): URL {
     const publicProto = firstForwarded(req.headers['x-forwarded-proto']) || req.protocol;
     const publicHost = firstForwarded(req.headers['x-forwarded-host']) || req.headers.host || req.host;
     const prefix = (firstForwarded(req.headers['x-forwarded-prefix']) || '').replace(/\/+$/, '');
@@ -295,7 +344,7 @@ export class MediaFlowProxyController {
     const password = envGet('MEDIA_FLOW_PROXY_PASSWORD') || 'aetheria-link-secret';
     url.searchParams.set('api_password', password);
     url.searchParams.set('d', master.href);
-    for (const [name, value] of Object.entries(DAILYMOTION_METADATA_HEADERS)) {
+    for (const [name, value] of Object.entries(headers)) {
       url.searchParams.set('h_' + name.toLowerCase(), value);
     }
     return url;
