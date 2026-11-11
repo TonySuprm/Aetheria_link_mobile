@@ -49,10 +49,19 @@ export class Dailymotion extends Extractor {
 
     // No Dailymotion calls here — the manifest token would be stale by play
     // time (and every /stream poll would burn the per-link rate limit). The
-    // play-time resolver route (MediaFlowProxyController /dm/:id) fetches a
-    // fresh token when the player actually requests this URL.
+    // play-time resolver route (MediaFlowProxyController /dm/:id) resolves
+    // everything when the player actually requests this URL.
+    //
+    // The configured MediaFlow rides along as query params: the /dm request
+    // comes FROM THE PLAYER, which has no /stream config, and the addon
+    // process itself may not have MEDIA_FLOW_PROXY_URL in its env (the Render
+    // deployment doesn't) — without these the resolver would fall back to the
+    // addon relay whose loopback upstream is dead there.
+    const resolverUrl = new URL(`/dm/${encodeURIComponent(videoId)}.m3u8`, ctx.hostUrl);
+    if (ctx.config.mediaFlowProxyUrl) resolverUrl.searchParams.set('mfp', ctx.config.mediaFlowProxyUrl);
+    if (ctx.config.mediaFlowProxyPassword) resolverUrl.searchParams.set('pw', ctx.config.mediaFlowProxyPassword);
     return [{
-      url: new URL(`/dm/${encodeURIComponent(videoId)}.m3u8`, ctx.hostUrl),
+      url: resolverUrl,
       format: Format.hls,
       meta: { ...meta, extractorId: this.id },
     }];

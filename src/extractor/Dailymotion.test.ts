@@ -12,8 +12,6 @@ const extractorRegistry = new ExtractorRegistry(logger, [new Dailymotion(undefin
 
 const ctx = createTestContext({ mediaFlowProxyUrl: 'https://mediaflow.test.org', mediaFlowProxyPassword: 'test' });
 
-
-
 /**
  * Dailymotion stream URLs are now PLAY-TIME resolver URLs on this add-on
  * (`/dm/<id>.m3u8`, served by MediaFlowProxyController). The sec= manifest
@@ -36,6 +34,10 @@ describe('Dailymotion', () => {
     const url = new URL(result.url.href);
     expect(url.origin).toBe('http://localhost');
     expect(url.pathname).toBe('/dm/xbbtrw2.m3u8');
+    // The configured MediaFlow rides along so the play-time resolver (which runs
+    // WITHOUT /stream config) can point players at the right proxy directly.
+    expect(url.searchParams.get('mfp')).toBe('https://mediaflow.test.org');
+    expect(url.searchParams.get('pw')).toBe('test');
   });
 
   test('parses the video id from a geo player page ?video= query', async () => {
@@ -77,7 +79,7 @@ describe('Dailymotion', () => {
     });
 
     test('returns undefined when only non-HLS qualities exist', () => {
-      expect(pickDailymotionMasterHls({ qualities: { '720': [{ type: 'video/mp4', url: 'https://x/video.mp4' }] } })).toBeUndefined();
+      expect(pickDailymotionMasterHls({ qualities: { 720: [{ type: 'video/mp4', url: 'https://x/video.mp4' }] } })).toBeUndefined();
       expect(pickDailymotionMasterHls({})).toBeUndefined();
       expect(pickDailymotionMasterHls(undefined)).toBeUndefined();
     });

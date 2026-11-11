@@ -6,8 +6,10 @@ import path from 'node:path';
 import { Request, Response, Router } from 'express';
 import winston from 'winston';
 import { DAILYMOTION_METADATA_HEADERS, pickDailymotionMasterHls } from '../extractor/Dailymotion';
-import { envGet } from '../utils';
+import { Context } from '../types';
+import { buildMediaFlowProxyHlsUrl, envGet, isEmbeddedMediaFlowProxy } from '../utils';
 import { DAILYMOTION_APP_HEADERS, fetchDailymotionAppHlsUrl, fetchDailymotionText, rewriteDailymotionMaster } from '../utils/dailymotion';
+import { getSyncedConfig } from '../utils/syncedConfig';
 
 /**
  * MediaFlow Proxy relay.
@@ -215,6 +217,52 @@ export class MediaFlowProxyController {
     void this.resolveViaDailymotionAppApi(req, res, videoId);
   }
 
+  /**
+   * MediaFlow config for PLAYER-facing URLs, resolved in priority order:
+   *   1. the `mfp`/`pw` query params the Dailymotion extractor attached to the /dm
+   *      URL (it knows the per-install config from the /stream request);
+   *   2. the addon process env (deployment-level config);
+   *   3. the synced webui config (Save & Apply / persisted file).
+   *
+   * When the resolved proxy is an external (public) one, player URLs point DIRECTLY
+   * at it — the addon `/proxy/*` relay's upstream comes from the env only, which the
+   * Render deployment doesn't set (its default loopback upstream is dead there).
+   */
+  private playerMediaFlowConfig(req: Request): { mediaFlowProxyUrl?: string | undefined; mediaFlowProxyPassword?: string | undefined } {
+    const qUrl = req.query['mfp'];
+    const qPassword = req.query['pw'];
+    if (typeof qUrl === 'string' && /^https?:\/\//i.test(qUrl) && qUrl.length <= 2048) {
+      return { mediaFlowProxyUrl: qUrl, mediaFlowProxyPassword: typeof qPassword === 'string' && qPassword.length <= 256 ? qPassword : undefined };
+    }
+
+    const envUrl = envGet('MEDIA_FLOW_PROXY_URL')?.trim();
+    if (envUrl) return { mediaFlowProxyUrl: envUrl, mediaFlowProxyPassword: envGet('MEDIA_FLOW_PROXY_PASSWORD') };
+
+    const synced = getSyncedConfig() ?? {};
+    const syncedUrl = typeof synced['mediaFlowProxyUrl'] === 'string' ? synced['mediaFlowProxyUrl'] : undefined;
+    const syncedPassword = typeof synced['mediaFlowProxyPassword'] === 'string' ? synced['mediaFlowProxyPassword'] : undefined;
+    if (syncedUrl) return { mediaFlowProxyUrl: syncedUrl, mediaFlowProxyPassword: syncedPassword };
+    return {};
+  }
+
+  /** HLS-proxy URL the PLAYER should fetch `target` from. External MediaFlow config
+   *  → the proxy directly; embedded/loopback or none → the add-on relay (public host). */
+  private playerFacingHlsUrl(req: Request, target: URL, headers: Record<string, string>): URL {
+    const mfp = this.playerMediaFlowConfig(req);
+    if (mfp.mediaFlowProxyUrl && !isEmbeddedMediaFlowProxy(mfp.mediaFlowProxyUrl)) {
+      return buildMediaFlowProxyHlsUrl(
+        {
+          hostUrl: new URL('https://dailymotion-resolver.invalid'),
+          id: 'dm-resolver',
+          config: mfp,
+        } as Context,
+        target,
+        headers,
+      );
+    }
+    return this.hlsProxyUrlFor(req, target, headers);
+  }
+
   /** Mobile-app-API path of `dailymotionResolver` — always terminates the response
    *  (200 rewritten master, or nothing when the caller should fall back). */
   private async resolveViaDailymotionAppApi(req: Request, res: Response, videoId: string): Promise<void> {
@@ -229,7 +277,7 @@ export class MediaFlowProxyController {
             hlsUrl,
             maxHeight,
             flat: envGet('DM_FLAT') !== '0',
-            rewriteUrl: url => this.hlsProxyUrlFor(req, url, DAILYMOTION_APP_HEADERS),
+            rewriteUrl: url => this.playerFacingHlsUrl(req, url, DAILYMOTION_APP_HEADERS),
           });
           this.logger.info(`Dailymotion ${videoId}: serving app-API master via MediaFlow (flat=${envGet('DM_FLAT') !== '0'}, maxHeight=${maxHeight})`);
           res.status(200)
@@ -311,7 +359,7 @@ export class MediaFlowProxyController {
             }
 
             res.setHeader('Cache-Control', 'no-store');
-            res.redirect(302, this.hlsProxyUrlFor(req, master).href);
+            res.redirect(302, this.playerFacingHlsUrl(req, master, DAILYMOTION_METADATA_HEADERS).href);
           });
           upstreamRes.on('error', () => {
             if (!res.headersSent) res.status(502).end('dailymotion metadata error');
