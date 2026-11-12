@@ -7,7 +7,7 @@ import { Request, Response, Router } from 'express';
 import winston from 'winston';
 import { DAILYMOTION_METADATA_HEADERS, pickDailymotionMasterHls } from '../extractor/Dailymotion';
 import { Context } from '../types';
-import { buildMediaFlowProxyHlsUrl, envGet, isEmbeddedMediaFlowProxy } from '../utils';
+import { buildMediaFlowProxyHlsUrl, envGet, isEmbeddedMediaFlowProxy, normalizeMediaFlowUrl } from '../utils';
 import { DAILYMOTION_APP_HEADERS, DailymotionViaMediaFlow, fetchDailymotionAppHlsUrl, fetchDailymotionText, rewriteDailymotionMaster } from '../utils/dailymotion';
 import { getSyncedConfig } from '../utils/syncedConfig';
 
@@ -229,17 +229,19 @@ export class MediaFlowProxyController {
    * Render deployment doesn't set (its default loopback upstream is dead there).
    */
   private playerMediaFlowConfig(req: Request): { mediaFlowProxyUrl?: string | undefined; mediaFlowProxyPassword?: string | undefined } {
-    const qUrl = req.query['mfp'];
+    // Normalize BEFORE validating: users (and thus old stream URLs) carry the
+    // proxy host bare — `?mfp=mediaflow-xyz.onrender.com` without a scheme.
+    const qUrl = normalizeMediaFlowUrl(typeof req.query['mfp'] === 'string' ? req.query['mfp'] : undefined);
     const qPassword = req.query['pw'];
-    if (typeof qUrl === 'string' && /^https?:\/\//i.test(qUrl) && qUrl.length <= 2048) {
+    if (qUrl && qUrl.length <= 2048) {
       return { mediaFlowProxyUrl: qUrl, mediaFlowProxyPassword: typeof qPassword === 'string' && qPassword.length <= 256 ? qPassword : undefined };
     }
 
-    const envUrl = envGet('MEDIA_FLOW_PROXY_URL')?.trim();
+    const envUrl = normalizeMediaFlowUrl(envGet('MEDIA_FLOW_PROXY_URL')?.trim());
     if (envUrl) return { mediaFlowProxyUrl: envUrl, mediaFlowProxyPassword: envGet('MEDIA_FLOW_PROXY_PASSWORD') };
 
     const synced = getSyncedConfig() ?? {};
-    const syncedUrl = typeof synced['mediaFlowProxyUrl'] === 'string' ? synced['mediaFlowProxyUrl'] : undefined;
+    const syncedUrl = normalizeMediaFlowUrl(typeof synced['mediaFlowProxyUrl'] === 'string' ? synced['mediaFlowProxyUrl'] : undefined);
     const syncedPassword = typeof synced['mediaFlowProxyPassword'] === 'string' ? synced['mediaFlowProxyPassword'] : undefined;
     if (syncedUrl) return { mediaFlowProxyUrl: syncedUrl, mediaFlowProxyPassword: syncedPassword };
     return {};
@@ -282,8 +284,8 @@ export class MediaFlowProxyController {
       return { baseUrl: this.upstreamBase(), password: envGet('MEDIA_FLOW_PROXY_PASSWORD') || 'aetheria-link-secret' };
     }
 
-    const qUrl = req.query['mfp'];
-    if (typeof qUrl === 'string' && /^https?:\/\//i.test(qUrl) && qUrl.length <= 2048) {
+    const qUrl = normalizeMediaFlowUrl(typeof req.query['mfp'] === 'string' ? req.query['mfp'] : undefined);
+    if (qUrl && qUrl.length <= 2048) {
       const qPassword = req.query['pw'];
       return {
         baseUrl: qUrl,

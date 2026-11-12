@@ -24,6 +24,26 @@ const configProtocol = (value: string): string => value.toLowerCase().startsWith
 const LOOPBACK_PROXY_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '[::1]', '::1']);
 
 /**
+ * Accepts a MediaFlow base URL with or WITHOUT a scheme — users routinely enter
+ * bare hosts (`mediaflow-xyz.onrender.com`) in the add-on config / webui, and a
+ * scheme-less value breaks every consumer: URL-based validation rejects it (the
+ * /dm resolver then falls back to dead URLs) and `configProtocol` defaults it to
+ * http://, which public hosts don't serve (and https players block as mixed
+ * content). Public hosts default to https; loopback hosts default to http.
+ */
+export const normalizeMediaFlowUrl = (value?: string): string | undefined => {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed.replace(/\/+$/, '');
+
+  const hostPart = (trimmed.split('/')[0] ?? '').toLowerCase();
+  const loopback = LOOPBACK_PROXY_HOSTS.has(hostPart.split(':')[0] ?? '')
+    || hostPart.startsWith('[')
+    || hostPart.startsWith('::');
+  return `${loopback ? 'http' : 'https'}://${trimmed}`.replace(/\/+$/, '');
+};
+
+/**
  * True when the configured MediaFlow Proxy is the embedded, co-running instance
  * (docker-compose/sidecar on loopback). Such a proxy has no address
  * reachable by Stremio players, so client-facing URLs must be exposed through
@@ -322,7 +342,7 @@ const spawnSupervisedProxy = (logger: Logger, binary: string, host: string, port
     logger.warn(`[mfp] exited (code=${code ?? '?'} signal=${signal ?? '?'}); restart ${nextAttempt}/${MFP_MAX_RESTARTS} in ${MFP_RESTART_DELAY_MS / 1000}s`);
     setTimeout(() => {
       if (!supervisionShuttingDown) {
-        ensureSidecarDnsProxy(logger).then((dnsPort) => spawnSupervisedProxy(logger, binary, host, port, nextAttempt, dnsPort)).catch(() => { /* ignore */ });
+        ensureSidecarDnsProxy(logger).then(dnsPort => spawnSupervisedProxy(logger, binary, host, port, nextAttempt, dnsPort)).catch(() => { /* ignore */ });
       }
     }, MFP_RESTART_DELAY_MS).unref();
   });
@@ -353,7 +373,7 @@ export const ensureEmbeddedMediaFlowProxy = async (logger: Logger): Promise<bool
     return true;
   }
 
-    const binary = envGet('MEDIA_FLOW_PROXY_BIN')
+  const binary = envGet('MEDIA_FLOW_PROXY_BIN')
     ?? (MFP_NATIVE_CANDIDATE() && existsSync(MFP_NATIVE_CANDIDATE() as string) ? MFP_NATIVE_CANDIDATE() : undefined)
     ?? MFP_BINARY_CANDIDATES.find(candidate => existsSync(candidate));
   if (!binary) {

@@ -1,9 +1,10 @@
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { Extractor } from '../extractor';
 import { Source } from '../source';
 import { Config } from '../types';
 import { envGet } from './env';
-import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { normalizeMediaFlowUrl } from './media-flow-proxy';
 
 export { envGet };
 
@@ -66,6 +67,12 @@ export const getConfigWithEnvFallback = (urlConfig?: Config): Config => {
     ...(envAlldebridApiKey && !baseConfig.alldebridApiKey && { alldebridApiKey: envAlldebridApiKey }),
     ...(envRealdebridApiKey && !baseConfig.realdebridApiKey && { realdebridApiKey: envRealdebridApiKey }),
   };
+
+  // Users enter bare hosts (`mediaflow-xyz.onrender.com`, no scheme) into the
+  // config UI — normalize once here so every consumer (extractor URLs, the /dm
+  // resolver, MediaFlow URL builders) sees a usable http(s) base.
+  const normalizedMediaFlowUrl = normalizeMediaFlowUrl(resolved.mediaFlowProxyUrl);
+  if (normalizedMediaFlowUrl) resolved.mediaFlowProxyUrl = normalizedMediaFlowUrl;
 
   // [halcyon patch] on-device embedded sidecar WINS over every config layer
   // (webui-saved config AND the per-request URL config segment): the

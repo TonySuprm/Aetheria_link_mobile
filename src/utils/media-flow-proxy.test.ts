@@ -8,6 +8,7 @@ import {
   buildMediaFlowProxyHlsUrl,
   buildMediaFlowProxyStreamUrl,
   isEmbeddedMediaFlowProxy,
+  normalizeMediaFlowUrl,
   parseLoopbackProxyTarget,
   probePort,
   supportsMediaFlowProxy,
@@ -147,5 +148,32 @@ describe('embedded sidecar bootstrap', () => {
     await expect(probePort('127.0.0.1', port)).resolves.toBe(true);
     await new Promise<void>(resolve => server.close(() => resolve()));
     await expect(probePort('127.0.0.1', port)).resolves.toBe(false);
+  });
+});
+
+describe('normalizeMediaFlowUrl', () => {
+  test('defaults scheme-less public hosts to https', () => {
+    expect(normalizeMediaFlowUrl('mediaflow-proxy-light-cloud.onrender.com')).toBe('https://mediaflow-proxy-light-cloud.onrender.com');
+    expect(normalizeMediaFlowUrl('mediaflow-host.example.com:8443')).toBe('https://mediaflow-host.example.com:8443');
+  });
+
+  test('defaults scheme-less loopback hosts to http', () => {
+    expect(normalizeMediaFlowUrl('127.0.0.1:8889')).toBe('http://127.0.0.1:8889');
+    expect(normalizeMediaFlowUrl('localhost')).toBe('http://localhost');
+    expect(normalizeMediaFlowUrl('0.0.0.0:8889')).toBe('http://0.0.0.0:8889');
+    expect(normalizeMediaFlowUrl('[::1]:8889')).toBe('http://[::1]:8889');
+    expect(normalizeMediaFlowUrl('::1')).toBe('http://::1');
+  });
+
+  test('leaves already-schemed URLs alone (trailing slashes stripped)', () => {
+    expect(normalizeMediaFlowUrl('https://mediaflow.example.com/')).toBe('https://mediaflow.example.com');
+    expect(normalizeMediaFlowUrl('http://127.0.0.1:8889')).toBe('http://127.0.0.1:8889');
+  });
+
+  test('trims whitespace and returns undefined for empty values', () => {
+    expect(normalizeMediaFlowUrl('  mediaflow.example.com  ')).toBe('https://mediaflow.example.com');
+    expect(normalizeMediaFlowUrl('')).toBeUndefined();
+    expect(normalizeMediaFlowUrl('   ')).toBeUndefined();
+    expect(normalizeMediaFlowUrl(undefined)).toBeUndefined();
   });
 });
