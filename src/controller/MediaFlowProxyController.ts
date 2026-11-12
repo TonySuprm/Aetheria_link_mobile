@@ -8,7 +8,7 @@ import winston from 'winston';
 import { DAILYMOTION_METADATA_HEADERS, pickDailymotionMasterHls } from '../extractor/Dailymotion';
 import { Context } from '../types';
 import { buildMediaFlowProxyHlsUrl, envGet, isEmbeddedMediaFlowProxy } from '../utils';
-import { DAILYMOTION_APP_HEADERS, fetchDailymotionAppHlsUrl, fetchDailymotionText, rewriteDailymotionMaster } from '../utils/dailymotion';
+import { DAILYMOTION_APP_HEADERS, DailymotionViaMediaFlow, fetchDailymotionAppHlsUrl, fetchDailymotionText, rewriteDailymotionMaster } from '../utils/dailymotion';
 import { getSyncedConfig } from '../utils/syncedConfig';
 
 /**
@@ -180,13 +180,13 @@ export class MediaFlowProxyController {
    * Play-time Dailymotion resolver (GET /dm/:videoId.m3u8).
    *
    * DEFAULT (mobile app API): resolve the video through Dailymotion's iOS-app GraphQL
-   * API (no yt-dlp), fetch the `hlsURL` master with the app User-Agent (the ONLY
-   * client class Dailymotion's /cdn/manifest route accepts — browser and MediaFlow's
-   * rustls UAs both get 403 there), then serve the master REWRITTEN: every variant
-   * URI is re-based onto the MediaFlow HLS proxy (which streams the dmcdn variants +
-   * segments with its header injection — verified reachable by MediaFlow, unlike the
-   * master host). The player only ever sees plain header-free URLs on this add-on's
-   * origin, which is what Samsung Tizen and every other normal player need.
+   * API (no yt-dlp). The `sec=` token in the issued `hlsURL` is IP-BOUND to the
+   * GraphQL caller, so when the add-on and MediaFlow run on DIFFERENT hosts (two
+   * Render services), BOTH the GraphQL call and the master fetch are relayed through
+   * MediaFlow (`/proxy/forward` + `/proxy/stream`) — one IP for the whole chain.
+   * The master is then served REWRITTEN: every variant URI is re-based onto the
+   * MediaFlow HLS proxy. The player only ever sees plain header-free URLs, which is
+   * what Samsung Tizen and every other normal player need.
    * DM_MAX_HEIGHT caps the ladder (2160 = full 4K), DM_FLAT=1 (default) keeps only
    * the top variant so playback starts at 4K immediately.
    *
@@ -263,13 +263,51 @@ export class MediaFlowProxyController {
     return this.hlsProxyUrlFor(req, target, headers);
   }
 
+  /**
+   * Server-side MediaFlow identity for the IP-BOUND Dailymotion calls (GraphQL
+   * token mint + master fetch). Resolution order:
+   *   1. the deployment-level config (env var or embedded sidecar) — authoritative
+   *      on-device, where the sidecar shares the device IP with the token;
+   *   2. the extractor-supplied public proxy (`?mfp=` on the /dm URL) — the Render
+   *      case, where no env is set and the public proxy is the only shared identity;
+   *   3. the synced webui config.
+   * Undefined → the add-on calls Dailymotion directly (only correct when the add-on
+   * and its MediaFlow share one egress IP).
+   */
+  private serverMediaFlowVia(req: Request): DailymotionViaMediaFlow | undefined {
+    const envUrl = envGet('MEDIA_FLOW_PROXY_URL')?.trim();
+    const nativeBinDir = envGet('AETH_NATIVE_BIN_DIR') || process.env['AETH_NATIVE_BIN_DIR'];
+    const sidecar = Boolean(nativeBinDir && existsSync(path.join(nativeBinDir, 'libmediaflow.so')));
+    if (envUrl || sidecar) {
+      return { baseUrl: this.upstreamBase(), password: envGet('MEDIA_FLOW_PROXY_PASSWORD') || 'aetheria-link-secret' };
+    }
+
+    const qUrl = req.query['mfp'];
+    if (typeof qUrl === 'string' && /^https?:\/\//i.test(qUrl) && qUrl.length <= 2048) {
+      const qPassword = req.query['pw'];
+      return {
+        baseUrl: qUrl,
+        password: typeof qPassword === 'string' && qPassword.length <= 256 ? qPassword : 'aetheria-link-secret',
+      };
+    }
+
+    const synced = getSyncedConfig() ?? {};
+    const syncedUrl = typeof synced['mediaFlowProxyUrl'] === 'string' ? synced['mediaFlowProxyUrl'] : undefined;
+    if (syncedUrl) {
+      const syncedPassword = typeof synced['mediaFlowProxyPassword'] === 'string' ? synced['mediaFlowProxyPassword'] : 'aetheria-link-secret';
+      return { baseUrl: syncedUrl, password: syncedPassword };
+    }
+    return undefined;
+  }
+
   /** Mobile-app-API path of `dailymotionResolver` — always terminates the response
    *  (200 rewritten master, or nothing when the caller should fall back). */
   private async resolveViaDailymotionAppApi(req: Request, res: Response, videoId: string): Promise<void> {
     try {
-      const hlsUrl = await fetchDailymotionAppHlsUrl(videoId);
+      const via = this.serverMediaFlowVia(req);
+      const hlsUrl = await fetchDailymotionAppHlsUrl(videoId, via);
       if (hlsUrl) {
-        const master = await fetchDailymotionText(hlsUrl);
+        const master = await fetchDailymotionText(hlsUrl, via);
         if (master && master.status === 200 && master.text.startsWith('#EXTM3U')) {
           const maxHeight = dmMaxHeight();
           const rewritten = rewriteDailymotionMaster({
@@ -279,7 +317,7 @@ export class MediaFlowProxyController {
             flat: envGet('DM_FLAT') !== '0',
             rewriteUrl: url => this.playerFacingHlsUrl(req, url, DAILYMOTION_APP_HEADERS),
           });
-          this.logger.info(`Dailymotion ${videoId}: serving app-API master via MediaFlow (flat=${envGet('DM_FLAT') !== '0'}, maxHeight=${maxHeight})`);
+          this.logger.info(`Dailymotion ${videoId}: serving app-API master via MediaFlow (via=${via ? 'mfp' : 'direct'}, flat=${envGet('DM_FLAT') !== '0'}, maxHeight=${maxHeight})`);
           res.status(200)
             .setHeader('Content-Type', 'application/vnd.apple.mpegurl')
             .setHeader('Cache-Control', 'no-store')
