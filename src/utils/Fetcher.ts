@@ -14,6 +14,20 @@ import { BlockedReason, Context } from '../types';
 import { envGet, envGetAppId } from './env';
 import { closeBrowser, getBrowser, stealthPage } from './puppeteer';
 
+/**
+ * Structural stand-in for puppeteer's HTTPRequest, used only for the
+ * request-interception callback annotation. Puppeteer is an OPTIONAL
+ * dependency (its Chrome download silently fails on builders like Railway's,
+ * and the runtime `require` in utils/puppeteer.ts is try/catch-guarded) — a
+ * type-only `import('puppeteer')` would still make `tsc` demand the module
+ * and break those builds.
+ */
+interface InterceptedRequest {
+  resourceType(): string;
+  abort(): Promise<void> | void;
+  continue(): Promise<void> | void;
+}
+
 interface FlareSolverrSolution {
   url: string;
   status: number;
@@ -715,7 +729,7 @@ export class Fetcher {
           );
           await page.setViewport({ width: 1280, height: 720 });
           await page.setRequestInterception(true);
-          page.on('request', (req: import('puppeteer').HTTPRequest) => {
+          page.on('request', (req: InterceptedRequest) => {
             const rt = req.resourceType();
             if (['image', 'stylesheet', 'font', 'media'].includes(rt)) req.abort();
             else req.continue();
